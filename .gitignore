@@ -1,5 +1,7 @@
 **/**/**.hi
 **/**/**.o
+examples/**.o
+examples/**.hi
 **/**/**.DS_Store
 dist
 .hub
