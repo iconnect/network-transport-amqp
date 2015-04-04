@@ -9,6 +9,8 @@ import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map (empty, insert, delete, elems)
 import qualified Data.ByteString.Char8 as BSC (pack)
 
+import Data.Monoid
+
 main :: IO ()
 main = do
   conn <- openConnection "localhost" "/" "guest" "guest"
@@ -20,11 +22,10 @@ main = do
   putStrLn $ "Chat server ready at " ++ (show . endPointAddressToByteString . address $ endpoint)
 
   flip evalStateT Map.empty . forever $ do
-    liftIO $ print "read next event"
     event <- liftIO $ receive endpoint
-    liftIO $ print "event read"
     case event of
       ConnectionOpened cid _ addr -> do
+        liftIO $ print $ "Connection opened with " <> show addr
         get >>= \clients -> liftIO $ do
           Right conn <- connect endpoint addr ReliableOrdered defaultConnectHints
           send conn [BSC.pack . show . Map.elems $ clients]
