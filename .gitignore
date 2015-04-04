@@ -1,7 +1,7 @@
-**/**/**.hi
-**/**/**.o
-examples/**.o
-examples/**.hi
+**/**/*.hi
+**/**/*.o
+examples/*.o
+examples/*.hi
 examples/chat-server
 examples/chat-client
 **/**/**.DS_Store
