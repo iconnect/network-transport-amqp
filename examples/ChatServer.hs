@@ -25,7 +25,7 @@ main = do
     event <- liftIO $ receive endpoint
     case event of
       ConnectionOpened cid _ addr -> do
-        liftIO $ print $ "Connection opened with " <> show addr
+        liftIO $ print $ "Connection opened with ID " <> show cid
         get >>= \clients -> liftIO $ do
           Right conn <- connect endpoint addr ReliableOrdered defaultConnectHints
           send conn [BSC.pack . show . Map.elems $ clients]

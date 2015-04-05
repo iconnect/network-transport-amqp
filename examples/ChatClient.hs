@@ -15,7 +15,6 @@ import qualified Data.Map as Map (fromList, elems, insert, member, empty, size, 
 chatClient :: MVar () -> EndPoint -> EndPointAddress -> IO ()
 chatClient done endpoint serverAddr = do
     connect endpoint serverAddr ReliableOrdered defaultConnectHints
-    print "Connected to the server"
     cOut <- getPeers >>= connectToPeers
     cIn  <- newMVar Map.empty
 
@@ -80,14 +79,10 @@ chatClient done endpoint serverAddr = do
   where
     getPeers :: IO [EndPointAddress]
     getPeers = do
-      m1 <- receive endpoint
-      print $ "Received " <> show m1 <> " from the server."
-      --Received _ msg <- receive endpoint
-      msg <- receive endpoint
-      print $ "Received " <> show msg <> " from the server."
+      ConnectionOpened{} <- receive endpoint
+      Received _ msg <- receive endpoint
       ConnectionClosed _ <- receive endpoint
-      print $ "Received ConnectionClosed"
-      return . map EndPointAddress . read . BSC.unpack . BS.concat $ []
+      return . map EndPointAddress . read . BSC.unpack . BS.concat $ msg
 
     connectToPeers :: [EndPointAddress] -> IO (MVar (Map EndPointAddress Connection))
     connectToPeers addrs = do

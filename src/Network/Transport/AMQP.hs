@@ -19,12 +19,15 @@ module Network.Transport.AMQP (
 import qualified Network.AMQP as AMQP
 import qualified Data.Text as T
 import Data.UUID.V4
-import Data.UUID (toString)
+import Data.List (foldl1')
+import Data.UUID (toString, toWords)
+import Data.Bits
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import GHC.Generics (Generic)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString as B
 import Data.String.Conv
 import Data.Serialize
 import Data.Monoid
@@ -159,11 +162,15 @@ startReceiver AMQPTransport{..} AMQPContext{..} = do
     case decode' msg of
       Left _ -> return ()
       Right (MessageInitConnection theirAddr theirId rel) -> do
-        writeChan ctx_evtChan $ ConnectionOpened theirId rel theirAddr
         -- TODO: Change me, sending twice 'theirId', I should be sending myId
         publish transportChannel theirAddr (MessageInitConnectionOk (toAddress ctx_endpoint) theirId theirId)
-      Right (MessageData cId msg) -> do
-        writeChan ctx_evtChan $ Received cId msg
+        -- TODO: This is a bug. I need to issue a ConnectionOpened with the
+        -- internal counter I am keeping, not the one coming from the remote
+        -- endpoint.
+        writeChan ctx_evtChan $ ConnectionOpened theirId rel theirAddr
+      Right (MessageData cId rawMsg) -> do
+        print $ "Received: " <> show rawMsg
+        writeChan ctx_evtChan $ Received cId rawMsg
       Right (MessageCloseConnection connId) -> do
         writeChan ctx_evtChan $ ConnectionClosed connId
       Right (MessageInitConnectionOk _ _ _) -> return () -- TODO: Do something
@@ -252,11 +259,15 @@ newValidRemoteEndpoint ep = newMVar RemoteEndPointValid >>= \var -> return Remot
   }
 
 --------------------------------------------------------------------------------
+-- TODO: Experimental: do a bitwise operation on the UUID to generate
+-- a random ConnectionId. Is this safe?
 newConnectionTo :: AMQPContext -> EndPointAddress -> IO (Maybe ConnectionId)
-newConnectionTo AMQPContext{..} theirAddress =
+newConnectionTo AMQPContext{..} theirAddress = do
+  let queueAsWord64 = foldl1' (+) (map fromIntegral $ B.unpack . toS $ ctx_endpoint)
+  (a,b,c,d) <- toWords <$> nextRandom
+  let cId = fromIntegral (a .|. b .|. c .|. d) + queueAsWord64
   modifyMVar ctx_state $ \st -> case st of
     LocalEndPointValid s -> do
-        let cId = s ^. nextConnectionId
         let ns  = over localConnections (Map.insert cId theirAddress) s
         return (LocalEndPointValid (over nextConnectionId (+1) ns), Just cId)
     LocalEndPointClosed -> return (LocalEndPointClosed, Nothing)
