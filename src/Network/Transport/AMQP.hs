@@ -68,6 +68,16 @@ deriving instance Generic Reliability
 instance Serialize Reliability
 instance Serialize AMQPMessage
 
+data InvariantViolated = 
+  InvariantViolated InvariantViolation
+  deriving Show
+
+data InvariantViolation =
+  EndPointNotInRemoteMap EndPointAddress
+  deriving Show
+
+instance Exception InvariantViolated
+
 --------------------------------------------------------------------------------
 -- | Data created by the `Transport` during bootstrap. The rationale is that
 -- we need to emulate point-to-point communication in RabbitMQ via a "direct"
@@ -180,10 +190,12 @@ startReceiver tr@AMQPTransport{..} ctx@AMQPContext{..} = do
         writeChan ctx_evtChan $ ConnectionOpened theirId ReliableOrdered theirAddr
       Right (MessageCloseConnection theirAddr _) -> do
         print "MessageCloseConnection"
-        cleanupRemoteConnection tr ctx theirAddr
-      Right (MessageEndPointClose theirAddr theirId) -> do
-        cleanupRemoteConnection tr ctx theirAddr
+        ourId <- cleanupRemoteConnection tr ctx theirAddr
+        writeChan ctx_evtChan $ ConnectionClosed ourId
+      Right (MessageEndPointClose theirAddr _) -> do
+        ourId <- cleanupRemoteConnection tr ctx theirAddr
         print "MessageEndPointClose"
+        writeChan ctx_evtChan $ ConnectionClosed ourId
       rst -> print rst
 
 --------------------------------------------------------------------------------
@@ -235,11 +247,11 @@ apiCloseEndPoint AMQPTransport{..} ctx@AMQPContext{..} evts ourEp = do
 cleanupRemoteConnection :: AMQPTransport
                         -> AMQPContext
                         -> EndPointAddress
-                        -> IO ()
+                        -> IO ConnectionId
 cleanupRemoteConnection AMQPTransport{..} ctx@AMQPContext{..} theirAddress = do
   let ourAddress = toAddress ctx_endpoint
   modifyValidLocalState ctx $ \vst -> case Map.lookup theirAddress (vst ^. localConnections) of
-    Nothing -> return (LocalEndPointValid vst, ())
+    Nothing -> throwIO $ InvariantViolated (EndPointNotInRemoteMap theirAddress)
     Just rep -> do
       let ourId = remoteId rep
       -- When we first asked to cleanup a remote connection, we do not delete it
@@ -253,8 +265,7 @@ cleanupRemoteConnection AMQPTransport{..} ctx@AMQPContext{..} theirAddress = do
       let newStateSetter mp = case wasAlreadyClosed of
                                 True -> Map.delete theirAddress mp
                                 False -> mp
-      writeChan ctx_evtChan $ ConnectionClosed ourId
-      return (LocalEndPointValid $ over localConnections newStateSetter vst, ())
+      return (LocalEndPointValid $ over localConnections newStateSetter vst, ourId)
 
 --------------------------------------------------------------------------------
 toAddress :: T.Text -> EndPointAddress
@@ -386,8 +397,9 @@ apiClose :: AMQPTransport
          -> EndPointAddress
          -> ConnectionId
          -> IO ()
-apiClose AMQPTransport{..} AMQPContext{..} ep connId = do
+apiClose tr@AMQPTransport{..} ctx@AMQPContext{..} ep connId = do
   let ourAddress = toAddress ctx_endpoint
+  _ <- cleanupRemoteConnection tr ctx ep
   publish transportChannel ep (MessageCloseConnection ourAddress connId)
 
 --------------------------------------------------------------------------------
