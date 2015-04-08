@@ -17,6 +17,10 @@ Source-Repository head
   Type:     git
   Location: https://github.com/adinapoli/network-transport-ampq
 
+flag distributed-process-tests
+  description: Build test suites that require distributed-process to be installed.
+  default:     False
+
 library
   exposed-modules:
     Network.Transport.AMQP
@@ -38,3 +42,17 @@ library
   default-language:    Haskell2010
   ghc-options:
     -Wall
+
+Test-Suite amqp-tests
+  type:               exitcode-stdio-1.0
+  main-is:            Tests.hs
+  build-depends:      base >= 4.4 && < 5,
+                      network-transport >= 0.4,
+                      network-transport-amqp,
+                      amqp,
+                      tasty,
+                      tasty-hunit,
+                      network-transport-tests >= 0.1.0.1
+  ghc-options:        -Wall -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
+  hs-source-dirs:     tests
+  default-language:   Haskell2010
