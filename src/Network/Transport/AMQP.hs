@@ -58,7 +58,7 @@ data AMQPMessage
   | MessageInitConnectionOk !EndPointAddress !ConnectionId !ConnectionId
   | MessageCloseConnection !EndPointAddress !ConnectionId
   | MessageData !ConnectionId ![ByteString]
-  | MessageEndPointClose !EndPointAddress !Bool
+  | MessageEndPointClose   !EndPointAddress !ConnectionId
   | MessageEndPointCloseOk !EndPointAddress
   deriving (Show, Generic)
 
@@ -178,10 +178,12 @@ startReceiver tr@AMQPTransport{..} ctx@AMQPContext{..} = do
         -- TODO: This smells
         print v
         writeChan ctx_evtChan $ ConnectionOpened theirId ReliableOrdered theirAddr
-        return () -- TODO: Do something
       Right (MessageCloseConnection theirAddr _) -> do
         print "MessageCloseConnection"
         cleanupRemoteConnection tr ctx theirAddr
+      Right (MessageEndPointClose theirAddr theirId) -> do
+        cleanupRemoteConnection tr ctx theirAddr
+        print "MessageEndPointClose"
       rst -> print rst
 
 --------------------------------------------------------------------------------
@@ -214,7 +216,15 @@ newAMQPCtx ep = do
 
 --------------------------------------------------------------------------------
 apiCloseEndPoint :: AMQPTransport -> AMQPContext -> [Event] -> T.Text -> IO ()
-apiCloseEndPoint AMQPTransport{..} AMQPContext{..} evts _ = do
+apiCloseEndPoint AMQPTransport{..} ctx@AMQPContext{..} evts ourEp = do
+  let ourAddress = toAddress ourEp
+
+  -- Notify all the remoters this EndPoint is dying.
+  withValidLocalState_ ctx $ \vst -> do
+    print (Map.keys $ vst ^. localConnections)
+    forM_ (Map.toList $ vst ^. localConnections) $ \(theirAddress, rep) ->
+      publish transportChannel theirAddress (MessageEndPointClose ourAddress (remoteId rep))
+
   -- Close the given connection
   forM_ evts (writeChan ctx_evtChan)
   _ <- AMQP.deleteQueue transportChannel ctx_endpoint
@@ -232,8 +242,19 @@ cleanupRemoteConnection AMQPTransport{..} ctx@AMQPContext{..} theirAddress = do
     Nothing -> return (LocalEndPointValid vst, ())
     Just rep -> do
       let ourId = remoteId rep
+      -- When we first asked to cleanup a remote connection, we do not delete it
+      -- immediately; conversely, be set its state to close and if the state was already
+      -- closed we delete it. This allows a RemoteEndPoint to be marked in closing state,
+      -- but to still be listed so that can receive subsequent notifications, like for
+      -- example the ConnectionClosed ones.
+      wasAlreadyClosed <- modifyMVar (remoteState rep) $ \rst -> case rst  of
+        RemoteEndPointValid  -> return (RemoteEndPointClosed, False)
+        RemoteEndPointClosed -> return (RemoteEndPointClosed, True)
+      let newStateSetter mp = case wasAlreadyClosed of
+                                True -> Map.delete theirAddress mp
+                                False -> mp
       writeChan ctx_evtChan $ ConnectionClosed ourId
-      return (LocalEndPointValid $ over localConnections (Map.delete theirAddress) vst, ())
+      return (LocalEndPointValid $ over localConnections newStateSetter vst, ())
 
 --------------------------------------------------------------------------------
 toAddress :: T.Text -> EndPointAddress

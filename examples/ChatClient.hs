@@ -22,11 +22,11 @@ chatClient done endpoint serverAddr = do
     -- Listen for incoming messages
     forkIO . forever $ do
       event <- receive endpoint
-      print event
       case event of
         Received _ msg ->
           putStrLn . BSC.unpack . BS.concat $ msg
         ConnectionOpened cid _ addr -> do
+          print "chat client loop - ConnectionOpened"
           modifyMVar_ cIn $ return . Map.insert cid addr
           didAdd <- modifyMVar cOut $ \conns ->
             if not (Map.member addr conns)
@@ -37,6 +37,7 @@ chatClient done endpoint serverAddr = do
                 return (conns, False)
           when didAdd $ showNumPeers cOut
         ConnectionClosed cid -> do
+          print "chat client loop - ConnectionClosed"
           addr <- modifyMVar cIn $ \conns ->
             return (Map.delete cid conns, conns Map.! cid)
           modifyMVar_ cOut $ \conns -> do
@@ -44,29 +45,6 @@ chatClient done endpoint serverAddr = do
             return (Map.delete addr conns)
           showNumPeers cOut
 
-
-
-{-
-    chatState <- newMVar (Map.fromList peerConns)
-
-    -- Thread to listen to incoming messages
-    forkIO . forever $ do
-      event <- receive endpoint
-      case event of
-        ConnectionOpened _ _ (EndPointAddress addr) -> do
-          modifyMVar_ chatState $ \peers ->
-            if not (Map.member addr peers)
-              then do
-                Right conn <- connect endpoint (EndPointAddress addr) ReliableOrdered
-                return (Map.insert addr conn peers)
-              else
-                return peers
-        Received _ msg ->
-          putStrLn . BSC.unpack . BS.concat $ msg
-        ConnectionClosed _ ->
-          return ()
-
--}
     -- Thread to interact with the user
     showNumPeers cOut
     let go = do
@@ -113,3 +91,4 @@ main = do
   forkIO $ chatClient clientDone endpoint (EndPointAddress . BSC.pack $ server)
 
   takeMVar clientDone
+  closeEndPoint endpoint
