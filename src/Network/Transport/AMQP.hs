@@ -56,7 +56,7 @@ data AMQPMessage
   = MessageConnect !EndPointAddress -- ^ Connection greeting
   | MessageInitConnection !EndPointAddress !ConnectionId !Reliability
   | MessageInitConnectionOk !EndPointAddress !ConnectionId !ConnectionId
-  | MessageCloseConnection !ConnectionId
+  | MessageCloseConnection !EndPointAddress !ConnectionId
   | MessageData !ConnectionId ![ByteString]
   | MessageEndPointClose !EndPointAddress !Bool
   | MessageEndPointCloseOk !EndPointAddress
@@ -84,8 +84,9 @@ data LocalEndPointState =
   | LocalEndPointClosed
 
 data RemoteEndPoint = RemoteEndPoint
-  { remoteEndPointAddress :: !EndPointAddress
-  , remoteEndPointState   :: !(MVar RemoteEndPointState)
+  { remoteAddress :: !EndPointAddress
+  , remoteId      :: !ConnectionId
+  , remoteState   :: !(MVar RemoteEndPointState)
   }
 
 data RemoteEndPointState
@@ -95,9 +96,7 @@ data RemoteEndPointState
 
 data ValidLocalEndPointState = ValidLocalEndPointState
   {
-    _nextConnectionId  :: !ConnectionId
-  , _localConnections  :: !(Map ConnectionId EndPointAddress)
-  , _remoteConnections :: !(Map EndPointAddress RemoteEndPoint)
+    _localConnections  :: !(Map EndPointAddress RemoteEndPoint)
   }
 
 makeLenses ''ValidLocalEndPointState
@@ -157,25 +156,51 @@ apiNewEndPoint tr@AMQPTransport{..} = do
 
 --------------------------------------------------------------------------------
 startReceiver :: AMQPTransport -> AMQPContext -> IO ()
-startReceiver AMQPTransport{..} AMQPContext{..} = do
+startReceiver tr@AMQPTransport{..} ctx@AMQPContext{..} = do
   void $ AMQP.consumeMsgs transportChannel ctx_endpoint AMQP.NoAck $ \(msg,_) -> do
     case decode' msg of
       Left _ -> return ()
-      Right (MessageInitConnection theirAddr theirId rel) -> do
-        -- TODO: Change me, sending twice 'theirId', I should be sending myId
-        publish transportChannel theirAddr (MessageInitConnectionOk (toAddress ctx_endpoint) theirId theirId)
-        -- TODO: This is a bug. I need to issue a ConnectionOpened with the
-        -- internal counter I am keeping, not the one coming from the remote
-        -- endpoint.
-        writeChan ctx_evtChan $ ConnectionOpened theirId rel theirAddr
+      Right v@(MessageInitConnection theirAddr theirId rel) -> do
+        print v
+        -- TODO: Do I need to persist this RemoteEndPoint with the id given to me?
+        (rep, isNew) <- findRemoteEndPoint ctx theirAddr
+        when isNew $ do
+          let ourId = remoteId rep
+          publish transportChannel theirAddr (MessageInitConnectionOk (toAddress ctx_endpoint) ourId theirId)
+          -- TODO: This is a bug?. I need to issue a ConnectionOpened with the
+          -- internal counter I am keeping, not the one coming from the remote
+          -- endpoint.
+          writeChan ctx_evtChan $ ConnectionOpened ourId rel theirAddr
       Right (MessageData cId rawMsg) -> do
-        print $ "Received: " <> show rawMsg
+        print $ "MessageData" ++ (show rawMsg)
         writeChan ctx_evtChan $ Received cId rawMsg
-      Right (MessageCloseConnection connId) -> do
-        writeChan ctx_evtChan $ ConnectionClosed connId
-      Right (MessageInitConnectionOk _ _ _) -> return () -- TODO: Do something
+      Right v@(MessageInitConnectionOk theirAddr theirId ourId) -> do
+        -- TODO: This smells
+        print v
+        writeChan ctx_evtChan $ ConnectionOpened theirId ReliableOrdered theirAddr
+        return () -- TODO: Do something
+      Right (MessageCloseConnection theirAddr _) -> do
+        print "MessageCloseConnection"
+        cleanupRemoteConnection tr ctx theirAddr
       rst -> print rst
 
+--------------------------------------------------------------------------------
+withValidLocalState_ :: AMQPContext
+                     -> (ValidLocalEndPointState -> IO b)
+                     -> IO b
+withValidLocalState_ AMQPContext{..} f = withMVar ctx_state $ \st ->
+  case st of
+    LocalEndPointClosed -> throw $ userError "withValidLocalState: LocalEndPointClosed"
+    LocalEndPointValid v -> f v
+
+--------------------------------------------------------------------------------
+modifyValidLocalState :: AMQPContext
+                       -> (ValidLocalEndPointState -> IO (LocalEndPointState, b))
+                       -> IO b
+modifyValidLocalState AMQPContext{..} f = modifyMVar ctx_state $ \st ->
+  case st of
+    LocalEndPointClosed -> throw $ userError "withValidLocalState: LocalEndPointClosed"
+    LocalEndPointValid v -> f v
 
 --------------------------------------------------------------------------------
 newAMQPCtx :: T.Text -> IO AMQPContext
@@ -185,15 +210,30 @@ newAMQPCtx ep = do
   return $ AMQPContext ch ep st
   where
     emptyState :: LocalEndPointState
-    emptyState = LocalEndPointValid $ ValidLocalEndPointState 0 Map.empty Map.empty
+    emptyState = LocalEndPointValid $ ValidLocalEndPointState Map.empty
 
 --------------------------------------------------------------------------------
 apiCloseEndPoint :: AMQPTransport -> AMQPContext -> [Event] -> T.Text -> IO ()
 apiCloseEndPoint AMQPTransport{..} AMQPContext{..} evts _ = do
+  -- Close the given connection
   forM_ evts (writeChan ctx_evtChan)
   _ <- AMQP.deleteQueue transportChannel ctx_endpoint
   AMQP.deleteExchange transportChannel ctx_endpoint
   modifyMVar_ ctx_state $ return . const LocalEndPointClosed
+
+--------------------------------------------------------------------------------
+cleanupRemoteConnection :: AMQPTransport
+                        -> AMQPContext
+                        -> EndPointAddress
+                        -> IO ()
+cleanupRemoteConnection AMQPTransport{..} ctx@AMQPContext{..} theirAddress = do
+  let ourAddress = toAddress ctx_endpoint
+  modifyValidLocalState ctx $ \vst -> case Map.lookup theirAddress (vst ^. localConnections) of
+    Nothing -> return (LocalEndPointValid vst, ())
+    Just rep -> do
+      let ourId = remoteId rep
+      writeChan ctx_evtChan $ ConnectionClosed ourId
+      return (LocalEndPointValid $ over localConnections (Map.delete theirAddress) vst, ())
 
 --------------------------------------------------------------------------------
 toAddress :: T.Text -> EndPointAddress
@@ -218,77 +258,64 @@ apiConnect tr@AMQPTransport{..} ctx@AMQPContext{..} theirAddress reliability _ =
     if ourAddress == theirAddress
       then connectToSelf ctx
     else do
-      mbConnId <- newConnectionTo ctx theirAddress
-      -- A `Connection` specifies:
-      -- 1. How I intend to communicate with this remote host
-      -- 2. How can I shutdown the connection with it.
-      case mbConnId of
-        Nothing -> throwIO $ userError "apiConnect: LocalEndPointClosed"
-        Just myId -> do
-          -- TODO: Find remote endpoint
-          -- Say hello
-          let msg = MessageInitConnection ourAddress myId reliability
-          publish transportChannel theirAddress msg
-          return Connection {
-                      send = apiSend tr ctx theirAddress myId
-                    , close = apiClose tr ctx theirAddress myId
-                    }
+      (rep, isNew) <- findRemoteEndPoint ctx theirAddress
+      let cId = remoteId rep
+      print $ "apiConnect cId: " ++ show cId
+      print $ "apiConnect new: " ++ show isNew
+      when isNew $ do
+        let msg = MessageInitConnection ourAddress cId reliability
+        publish transportChannel theirAddress msg
+      return Connection {
+                  send = apiSend tr ctx theirAddress cId
+                , close = apiClose tr ctx theirAddress cId
+                }
 
 -- | Find a remote endpoint. If the remote endpoint does not yet exist we
 -- create it. Returns if the endpoint was new.
 findRemoteEndPoint :: AMQPContext
                    -> EndPointAddress
                    -> IO (RemoteEndPoint, Bool)
-findRemoteEndPoint AMQPContext{..} theirAddr = modifyMVar ctx_state $ \st -> do
+findRemoteEndPoint ctx@AMQPContext{..} theirAddr = modifyMVar ctx_state $ \st -> do
   case st of
     LocalEndPointClosed -> throw $ userError "findRemoteEndpoint: local endpoint was closed."
     LocalEndPointValid v ->
-      case Map.lookup theirAddr (v ^. remoteConnections) of
+      case Map.lookup theirAddr (v ^. localConnections) of
         -- TODO: Check if the RemoteEndPoint is closed.
         Just r -> return (LocalEndPointValid v, (r, False))
         Nothing -> do
-          newRem <- newValidRemoteEndpoint theirAddr
+          newRem <- newValidRemoteEndpoint ctx theirAddr
           let newMap = Map.insert theirAddr newRem
-          return (LocalEndPointValid $ over remoteConnections newMap v, (newRem, True))
+          return (LocalEndPointValid $ over localConnections newMap v, (newRem, True))
 
 --------------------------------------------------------------------------------
-newValidRemoteEndpoint :: EndPointAddress -> IO RemoteEndPoint
-newValidRemoteEndpoint ep = newMVar RemoteEndPointValid >>= \var -> return RemoteEndPoint {
-    remoteEndPointAddress = ep
-  , remoteEndPointState = var
-  }
-
---------------------------------------------------------------------------------
--- TODO: Experimental: do a bitwise operation on the UUID to generate
--- a random ConnectionId. Is this safe?
-newConnectionTo :: AMQPContext -> EndPointAddress -> IO (Maybe ConnectionId)
-newConnectionTo AMQPContext{..} theirAddress = do
+newValidRemoteEndpoint :: AMQPContext -> EndPointAddress -> IO RemoteEndPoint
+newValidRemoteEndpoint ctx@AMQPContext{..} ep = do
+  -- TODO: Experimental: do a bitwise operation on the UUID to generate
+  -- a random ConnectionId. Is this safe?
   let queueAsWord64 = foldl1' (+) (map fromIntegral $ B.unpack . toS $ ctx_endpoint)
   (a,b,c,d) <- toWords <$> nextRandom
   let cId = fromIntegral (a .|. b .|. c .|. d) + queueAsWord64
-  modifyMVar ctx_state $ \st -> case st of
-    LocalEndPointValid s -> do
-        let ns  = over localConnections (Map.insert cId theirAddress) s
-        return (LocalEndPointValid (over nextConnectionId (+1) ns), Just cId)
-    LocalEndPointClosed -> return (LocalEndPointClosed, Nothing)
+  var <- newMVar RemoteEndPointValid
+  return $ RemoteEndPoint ep cId var
 
 --------------------------------------------------------------------------------
 connectFailed :: SomeException -> TransportError ConnectErrorCode
 connectFailed = TransportError ConnectFailed . show
 
 --------------------------------------------------------------------------------
+-- TODO: Deal with exceptions.
 connectToSelf :: AMQPContext -> IO Connection
 connectToSelf ctx@AMQPContext{..} = do
-    let ep = toAddress ctx_endpoint
-    mbConnId  <- newConnectionTo ctx ep
-    case mbConnId of
-      Nothing -> throwIO $ TransportError ConnectFailed "Connection Failed"
-      Just cId -> do
-        writeChan ctx_evtChan $ ConnectionOpened cId ReliableOrdered ep
-        return Connection { 
-            send  = selfSend cId
-          , close = selfClose cId
-        }
+    let ourEndPoint = toAddress ctx_endpoint
+    (rep, _) <- findRemoteEndPoint ctx ourEndPoint
+    let cId = remoteId rep
+    print cId
+    writeChan ctx_evtChan $ ConnectionOpened cId ReliableOrdered ourEndPoint
+    return Connection { 
+        send  = selfSend cId
+      , close = selfClose cId
+    }
+    -- throwIO $ TransportError ConnectFailed "Connection Failed"
   where
     selfSend :: ConnectionId
              -> [ByteString]
@@ -301,7 +328,7 @@ connectToSelf ctx@AMQPContext{..} = do
           throwIO $ TransportError SendFailed "Endpoint closed"
 
     selfClose :: ConnectionId -> IO ()
-    selfClose connId =
+    selfClose connId = do
       withMVar ctx_state $ \st -> case st of
         LocalEndPointValid _ -> do
           writeChan ctx_evtChan (ConnectionClosed connId)
@@ -332,14 +359,15 @@ apiSend AMQPTransport{..} AMQPContext{..} their connId msgs = Right <$>
 
 --------------------------------------------------------------------------------
 -- | Change the status of this `Endpoint` to be closed
+-- TODO: If a Remote EndPoint is closed, reopen it afterwards?
 apiClose :: AMQPTransport
          -> AMQPContext
          -> EndPointAddress
          -> ConnectionId
          -> IO ()
 apiClose AMQPTransport{..} AMQPContext{..} ep connId = do
-  writeChan ctx_evtChan (ConnectionClosed connId)
-  publish transportChannel ep (MessageCloseConnection connId)
+  let ourAddress = toAddress ctx_endpoint
+  publish transportChannel ep (MessageCloseConnection ourAddress connId)
 
 --------------------------------------------------------------------------------
 createTransport :: AMQPTransport -> Transport

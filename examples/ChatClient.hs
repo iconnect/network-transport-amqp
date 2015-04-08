@@ -15,12 +15,14 @@ import qualified Data.Map as Map (fromList, elems, insert, member, empty, size, 
 chatClient :: MVar () -> EndPoint -> EndPointAddress -> IO ()
 chatClient done endpoint serverAddr = do
     connect endpoint serverAddr ReliableOrdered defaultConnectHints
+    print "Connected to server"
     cOut <- getPeers >>= connectToPeers
     cIn  <- newMVar Map.empty
 
     -- Listen for incoming messages
     forkIO . forever $ do
       event <- receive endpoint
+      print event
       case event of
         Received _ msg ->
           putStrLn . BSC.unpack . BS.concat $ msg

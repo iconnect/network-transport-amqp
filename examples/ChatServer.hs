@@ -1,10 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 import System.Environment (getArgs)
 import Network.Transport
 import Network.Transport.AMQP (createTransport, AMQPTransport(..))
 import Network.AMQP (openChannel, openConnection)
 import Control.Monad.State (evalStateT, modify, get)
 import Control.Monad (forever)
+import Control.Exception
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map (empty, insert, delete, elems)
 import qualified Data.ByteString.Char8 as BSC (pack)
@@ -20,8 +22,11 @@ main = do
   Right endpoint  <- newEndPoint transport
 
   putStrLn $ "Chat server ready at " ++ (show . endPointAddressToByteString . address $ endpoint)
+  
+  go endpoint `catch` \(_ :: SomeException) -> closeEndPoint endpoint
 
-  flip evalStateT Map.empty . forever $ do
+  where
+   go endpoint = flip evalStateT Map.empty . forever $ do
     event <- liftIO $ receive endpoint
     case event of
       ConnectionOpened cid _ addr -> do
@@ -31,5 +36,6 @@ main = do
           send conn [BSC.pack . show . Map.elems $ clients]
           close conn
         modify $ Map.insert cid (endPointAddressToByteString addr)
-      ConnectionClosed cid ->
+      ConnectionClosed cid -> do
+        liftIO $ print $ "Connection closed with ID " <> show cid
         modify $ Map.delete cid
