@@ -24,7 +24,8 @@ flag distributed-process-tests
 library
   exposed-modules:
     Network.Transport.AMQP
-  -- other-modules:       
+  other-modules:
+    Network.Transport.AMQP.Internal.Types
   -- other-extensions:    
   build-depends:       
       base >=4.8 && <5.0
