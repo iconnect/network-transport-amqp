@@ -35,15 +35,21 @@ test_simple = do
     transport <- newTransport
     Right ep1 <- newEndPoint transport
     Right ep2 <- newEndPoint transport
+    print "before connect"
     Right c1  <- connect ep1 (address ep2) ReliableOrdered defaultConnectHints
     Right c2  <- connect ep2 (address ep1) ReliableOrdered defaultConnectHints
+    print "after connect"
     Right _   <- send c1 ["123"]
     Right _   <- send c2 ["321"]
     close c1
     close c2
+    print "before receive1"
     [ConnectionOpened _ ReliableOrdered _, Received _ ["321"], ConnectionClosed _] <- replicateM 3 $ receive ep1
+    print "before receive2"
     [ConnectionOpened _ ReliableOrdered _, Received _ ["123"], ConnectionClosed _] <- replicateM 3 $ receive ep2
+    print "before closeTra"
     closeTransport transport
+    print "after closeTra"
 
 --test_connectionBreak :: IO ()
 --test_connectionBreak = do

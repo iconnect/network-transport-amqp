@@ -18,7 +18,6 @@ import Data.UUID.V4
 import Data.List (foldl1')
 import Data.UUID (toString, toWords)
 import Data.Bits
-import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.ByteString (ByteString)
 import Data.Foldable
@@ -102,7 +101,7 @@ apiNewEndPoint is@AMQPInternalState{..} = do
 startReceiver :: AMQPInternalState -> LocalEndPoint -> IO ()
 startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
   withMVar localState $ \lst -> case lst of
-    LocalEndPointValid vst@ValidLocalEndPointState{..} -> do
+    LocalEndPointValid ValidLocalEndPointState{..} -> do
       void $ AMQP.consumeMsgs _localChannel (fromAddress localAddress) AMQP.NoAck $ \(msg,_) -> do
         case decode' msg of
           Left _ -> return ()
@@ -120,17 +119,18 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
           Right (MessageData cId rawMsg) -> do
               writeChan _localChan $ Received cId rawMsg
           Right v@(MessageInitConnectionOk theirAddr theirId ourId) -> do
-              -- TODO: This smells
               print v
               writeChan _localChan $ ConnectionOpened theirId ReliableOrdered theirAddr
-          Right (MessageCloseConnection theirAddr theirId) -> do
-              print "MessageCloseConnection"
-              cleanupRemoteConnection tr lep theirAddr
-              writeChan _localChan $ ConnectionClosed theirId
-          Right (MessageEndPointClose theirAddr theirId) -> do
+          Right v@(MessageCloseConnection theirAddr theirId) -> do
               unless (localAddress == theirAddr) $ do
-                cleanupRemoteConnection tr lep theirAddr
-                print "MessageEndPointClose"
+                print v
+                alreadyClosed <- closeRemoteConnection tr lep theirAddr
+                print $ "Alreday closed: " ++ show alreadyClosed
+                writeChan _localChan $ ConnectionClosed theirId
+          Right v@(MessageEndPointClose theirAddr theirId) -> do
+              print v
+              unless (localAddress == theirAddr) $ do
+                void $ closeRemoteConnection tr lep theirAddr
                 writeChan _localChan $ ConnectionClosed theirId
           rst -> print rst
     _ -> return ()
@@ -144,18 +144,6 @@ withValidLocalState_ LocalEndPoint{..} f = withMVar localState $ \st ->
   case st of
     LocalEndPointClosed -> return ()
     LocalEndPointNoAcceptConections -> return ()
-    LocalEndPointValid v -> f v
-
---------------------------------------------------------------------------------
-modifyValidLocalState :: LocalEndPoint
-                       -> (ValidLocalEndPointState -> IO (LocalEndPointState, b))
-                       -> IO b
-modifyValidLocalState LocalEndPoint{..} f = modifyMVar localState $ \st ->
-  case st of
-    LocalEndPointClosed -> 
-      throw $ userError "modifyValidLocalState: LocalEndPointClosed"
-    LocalEndPointNoAcceptConections ->
-      throw $ userError "modifyValidLocalState: LocalEndPointNoAcceptConnections"
     LocalEndPointValid v -> f v
 
 --------------------------------------------------------------------------------
@@ -173,48 +161,52 @@ newLocalEndPoint ep amqpCh = do
 apiCloseEndPoint :: AMQPInternalState
                  -> LocalEndPoint
                  -> IO ()
-apiCloseEndPoint AMQPInternalState{..} lep@LocalEndPoint{..} = do
-  let evts = [ EndPointClosed , throw $ userError "Endpoint closed"]
+apiCloseEndPoint AMQPInternalState{..} LocalEndPoint{..} = do
   let ourAddress = localAddress
 
   -- Notify all the remoters this EndPoint is dying.
-  modifyMVar_ localState $ \lst -> case lst of
+  old <- readMVar localState
+  case old of
+    LocalEndPointClosed -> return ()
+    LocalEndPointNoAcceptConections -> return ()
     LocalEndPointValid vst@ValidLocalEndPointState{..} -> do
       print (Map.keys $ vst ^. localConnections)
-      forM_ (Map.toList $ vst ^. localConnections) $ \(theirAddress, rep) ->
-        publish _localChannel theirAddress (MessageEndPointClose ourAddress (remoteId rep))
+      forM_ (Map.toList $ vst ^. localConnections) $ \(theirAddress, rep) -> do
+        withMVar (remoteState rep) $ \rst -> case rst of
+          RemoteEndPointClosed -> return ()
+          _ -> publish _localChannel theirAddress (MessageEndPointClose ourAddress (remoteId rep))
 
       -- Close the given connection
-      forM_ evts (writeChan _localChan)
+      writeChan _localChan EndPointClosed
       let queue = fromAddress localAddress
       _ <- AMQP.deleteQueue _localChannel queue
-      AMQP.deleteExchange _localChannel queue
-      return LocalEndPointClosed
-    _ -> return LocalEndPointClosed
+      AMQP.closeChannel _localChannel
+
+  void $ swapMVar localState LocalEndPointClosed
+
+  modifyMVar_ istate_tstate $ \tst -> case tst of
+    TransportClosed  -> return TransportClosed
+    TransportValid v@ValidTransportState{..} -> do
+       let newMap = Map.delete localAddress tstateEndPoints
+       return (TransportValid v { tstateEndPoints = newMap })
 
 --------------------------------------------------------------------------------
-cleanupRemoteConnection :: AMQPInternalState
-                        -> LocalEndPoint
-                        -> EndPointAddress
-                        -> IO ()
-cleanupRemoteConnection AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress = do
-  let ourAddress = localAddress
-  modifyValidLocalState lep $ \vst -> case Map.lookup theirAddress (vst ^. localConnections) of
-    Nothing -> throwIO $ InvariantViolated (EndPointNotInRemoteMap theirAddress)
-    Just rep -> do
-      let ourId = remoteId rep
-      -- When we first asked to cleanup a remote connection, we do not delete it
-      -- immediately; conversely, be set its state to close and if the state was already
-      -- closed we delete it. This allows a RemoteEndPoint to be marked in closing state,
-      -- but to still be listed so that can receive subsequent notifications, like for
-      -- example the ConnectionClosed ones.
-      wasAlreadyClosed <- modifyMVar (remoteState rep) $ \rst -> case rst  of
-        RemoteEndPointValid  -> return (RemoteEndPointClosed, False)
-        RemoteEndPointClosed -> return (RemoteEndPointClosed, True)
-      let newStateSetter mp = case wasAlreadyClosed of
-                                True -> Map.delete theirAddress mp
-                                False -> mp
-      return (LocalEndPointValid $ over localConnections newStateSetter vst, ())
+-- | Returns whether or not the `RemoteEndPoint` was already closed.
+closeRemoteConnection :: AMQPInternalState
+                      -> LocalEndPoint
+                      -> EndPointAddress
+                      -> IO Bool
+closeRemoteConnection AMQPInternalState{..} LocalEndPoint{..} theirAddress = do
+  withMVar localState $ \lst -> case lst of
+    (LocalEndPointValid vst@ValidLocalEndPointState{..}) -> do
+      case Map.lookup theirAddress (vst ^. localConnections) of
+        Nothing -> throwIO $ InvariantViolated (EndPointNotInRemoteMap theirAddress)
+        Just rep -> do
+          clsd <- modifyMVar (remoteState rep) $ \rst -> case rst  of
+            RemoteEndPointValid  -> return (RemoteEndPointClosed, False)
+            RemoteEndPointClosed -> return (RemoteEndPointClosed, True)
+          return clsd
+    _ -> return True
 
 --------------------------------------------------------------------------------
 toAddress :: T.Text -> EndPointAddress
@@ -348,19 +340,21 @@ apiSend :: AMQPInternalState
         -> EndPointAddress
         -> ConnectionId
         -> [ByteString] -> IO (Either (TransportError SendErrorCode) ())
-apiSend is lep@LocalEndPoint{..} their connId msgs = do
+apiSend is LocalEndPoint{..} their connId msgs = do
   try . withMVar (istate_tstate is) $ \tst -> case tst of
     TransportClosed -> 
       throwIO $ TransportError SendFailed "apiSend: TransportClosed"
-    TransportValid _ -> withValidLocalState_ lep $ \vst@ValidLocalEndPointState{..} -> 
-      case Map.lookup their (vst ^. localConnections) of
+    TransportValid _ -> withMVar localState $ \lst -> case lst of
+      (LocalEndPointValid vst@ValidLocalEndPointState{..}) -> case Map.lookup their (vst ^. localConnections) of
         Nothing  -> throwIO $ TransportError SendFailed "apiSend: address not in local connections"
         Just rep -> withMVar (remoteState rep) $ \rst -> case rst of
           RemoteEndPointClosed -> throwIO $ TransportError SendFailed "apiSend: Connection closed"
           RemoteEndPointValid ->  publish _localChannel their (MessageData connId msgs)
+      _ -> throwIO $ TransportError SendFailed "apiSend: LocalEndPointClosed"
 
 --------------------------------------------------------------------------------
--- | Change the status of this `Endpoint` to be closed
+-- | Change the status of the `RemoteEndPoint` to be closed. If the
+-- `EndPoint` is already closed, we simply return.
 apiClose :: AMQPInternalState
          -> LocalEndPoint
          -> EndPointAddress
@@ -368,7 +362,7 @@ apiClose :: AMQPInternalState
          -> IO ()
 apiClose tr@AMQPInternalState{..} lep@LocalEndPoint{..} ep connId = do
   let ourAddress = localAddress
-  cleanupRemoteConnection tr lep ep
+  void $ closeRemoteConnection tr lep ep
   withValidLocalState_ lep $ \ValidLocalEndPointState{..} ->
     publish _localChannel ep (MessageCloseConnection ourAddress connId)
 
@@ -385,12 +379,11 @@ createTransport params@AMQPParameters{..} = do
 
 --------------------------------------------------------------------------------
 apiCloseTransport :: AMQPInternalState -> IO ()
-apiCloseTransport is =
-  modifyMVar_ (istate_tstate is) $ \tst -> case tst of
-    TransportClosed -> return TransportClosed
-    TransportValid (ValidTransportState cnn mp) -> do
-      print "Before closing all"
-      traverse_ (apiCloseEndPoint is) mp
-      print "After closing all endpoints"
-      AMQP.closeConnection cnn
-      return TransportClosed
+apiCloseTransport is = do
+  old <- readMVar $ istate_tstate is
+  case old of
+    TransportClosed -> return ()
+    -- Do not close the externally-passed AMQP connection,
+    -- or it will compromise users sharing it!
+    TransportValid (ValidTransportState _ mp) -> traverse_ (apiCloseEndPoint is) mp
+  void $ swapMVar (istate_tstate is) TransportClosed

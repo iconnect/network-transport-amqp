@@ -22,22 +22,22 @@ testTransportCompliance newTransport = do
   runTests
     [ ("PingPong",              testPingPong transport numPings)
       , ("EndPoints",             testEndPoints transport numPings)
---     , ("Connections",           testConnections transport numPings)
+--    , ("Connections",           testConnections transport numPings)
 --      , ("CloseOneConnection",    testCloseOneConnection transport numPings)
 --     , ("CloseOneDirection",     testCloseOneDirection transport numPings)
 --    , ("CloseReopen",           testCloseReopen transport numPings)
 -- invariant violated    , ("ParallelConnects",      testParallelConnects transport 10)
 --   , ("SendAfterClose",        testSendAfterClose transport 100)
 --   , ("Crossing",              testCrossing transport 10)
---   , ("CloseTwice",            testCloseTwice transport 100)
+--     , ("CloseTwice",            testCloseTwice transport 100)
      , ("ConnectToSelf",         testConnectToSelf transport numPings)
 -- Invalid: connection closed     , ("ConnectToSelfTwice",    testConnectToSelfTwice transport numPings)
      , ("CloseSelf",             testCloseSelf newTransport)
---   , ("CloseEndPoint",         testCloseEndPoint transport numPings)
+--    , ("CloseEndPoint",         testCloseEndPoint transport numPings)
 --   , ("CloseTransport",        testCloseTransport newTransport)
 --   , ("ExceptionOnReceive",    testExceptionOnReceive newTransport)
 --   , ("SendException",         testSendException newTransport)
 --   , ("Kill",                  testKill newTransport 80)
     ]
   where
-    numPings = 1 :: Int
+    numPings = 10 :: Int
