@@ -1,9 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-import System.Environment (getArgs)
 import Network.Transport
-import Network.Transport.AMQP (createTransport, AMQPTransport(..))
-import Network.AMQP (openChannel, openConnection)
+import Network.Transport.AMQP (createTransport, AMQPParameters(..))
+import Network.AMQP (openConnection)
 import Control.Monad.State (evalStateT, modify, get)
 import Control.Monad (forever)
 import Control.Exception
@@ -16,9 +15,8 @@ import Data.Monoid
 main :: IO ()
 main = do
   conn <- openConnection "localhost" "/" "guest" "guest"
-  ch <- openChannel conn
-  let amqpTransport = AMQPTransport conn ch (Just "chat-server-example")
-  let transport = createTransport amqpTransport
+  let amqpTransport = AMQPParameters conn "multicast" (Just "chat-server-example")
+  transport <- createTransport amqpTransport
   Right endpoint  <- newEndPoint transport
 
   putStrLn $ "Chat server ready at " ++ (show . endPointAddressToByteString . address $ endpoint)

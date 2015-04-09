@@ -20,24 +20,20 @@ import Data.UUID (toString, toWords)
 import Data.Bits
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import GHC.Generics (Generic)
 import Data.ByteString (ByteString)
 import Data.Foldable
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as B
 import Data.String.Conv
 import Data.Serialize
-import Data.Monoid
 import Network.Transport
 import Network.Transport.Internal (asyncWhenCancelled)
 import Control.Concurrent.MVar
-import Control.Applicative
 import Control.Monad
 import Control.Exception
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 
 import Lens.Family2
-import Lens.Family2.TH
 
 --------------------------------------------------------------------------------
 -- Utility functions
@@ -132,9 +128,10 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
               cleanupRemoteConnection tr lep theirAddr
               writeChan _localChan $ ConnectionClosed theirId
           Right (MessageEndPointClose theirAddr theirId) -> do
-              cleanupRemoteConnection tr lep theirAddr
-              print "MessageEndPointClose"
-              writeChan _localChan $ ConnectionClosed theirId
+              unless (theirAddr == localAddress) $ do
+                cleanupRemoteConnection tr lep theirAddr
+                print "MessageEndPointClose"
+                writeChan _localChan $ ConnectionClosed theirId
           rst -> print rst
     _ -> return ()
 
@@ -156,9 +153,9 @@ modifyValidLocalState :: LocalEndPoint
 modifyValidLocalState LocalEndPoint{..} f = modifyMVar localState $ \st ->
   case st of
     LocalEndPointClosed -> 
-      throw $ userError "withValidLocalState: LocalEndPointClosed"
+      throw $ userError "modifyValidLocalState: LocalEndPointClosed"
     LocalEndPointNoAcceptConections ->
-      throw $ userError "withValidLocalState: LocalEndPointNoAcceptConnections"
+      throw $ userError "modifyValidLocalState: LocalEndPointNoAcceptConnections"
     LocalEndPointValid v -> f v
 
 --------------------------------------------------------------------------------
@@ -181,17 +178,22 @@ apiCloseEndPoint AMQPInternalState{..} lep@LocalEndPoint{..} = do
   let ourAddress = localAddress
 
   -- Notify all the remoters this EndPoint is dying.
-  modifyValidLocalState lep $ \vst@ValidLocalEndPointState{..} -> do
-    print (Map.keys $ vst ^. localConnections)
-    forM_ (Map.toList $ vst ^. localConnections) $ \(theirAddress, rep) ->
-      publish _localChannel theirAddress (MessageEndPointClose ourAddress (remoteId rep))
+  print "aCe: before modifyMVar"
+  modifyMVar_ localState $ \lst -> case lst of
+    LocalEndPointValid vst@ValidLocalEndPointState{..} -> do
+      print (Map.keys $ vst ^. localConnections)
+      forM_ (Map.toList $ vst ^. localConnections) $ \(theirAddress, rep) ->
+        publish _localChannel theirAddress (MessageEndPointClose ourAddress (remoteId rep))
 
-    -- Close the given connection
-    forM_ evts (writeChan _localChan)
-    let queue = fromAddress localAddress
-    _ <- AMQP.deleteQueue _localChannel queue
-    AMQP.deleteExchange _localChannel queue
-    return (LocalEndPointClosed, ())
+      print "after publish"
+      -- Close the given connection
+      forM_ evts (writeChan _localChan)
+      let queue = fromAddress localAddress
+      _ <- AMQP.deleteQueue _localChannel queue
+      AMQP.deleteExchange _localChannel queue
+      print "before yielding localEPcl"
+      return LocalEndPointClosed
+    _ -> return LocalEndPointClosed
 
 --------------------------------------------------------------------------------
 cleanupRemoteConnection :: AMQPInternalState
@@ -234,29 +236,29 @@ apiConnect :: AMQPInternalState
            -> IO (Either (TransportError ConnectErrorCode) Connection)
 apiConnect tr@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliability _ = do
   let ourAddress = localAddress
-  try . asyncWhenCancelled close $ modifyMVar localState $ \lst -> case lst of
-    LocalEndPointClosed ->
-      throwIO $ TransportError ConnectFailed "apiConnect: LocalEndPointClosed"
-    LocalEndPointNoAcceptConections ->
-      throw $ userError "apiConnect: local endpoint doesn't accept connections."
-    LocalEndPointValid vst@ValidLocalEndPointState{..} -> do
-      if ourAddress == theirAddress
-      then do
-        selfConn <- connectToSelf lep
-        return (LocalEndPointValid vst, selfConn)
-      else do
-        (rep, isNew) <- findRemoteEndPoint lep theirAddress
-        let cId = remoteId rep
-        print $ "apiConnect cId: " ++ show cId
-        print $ "apiConnect new: " ++ show isNew
-        when isNew $ do
-            let msg = MessageInitConnection ourAddress cId reliability
-            publish _localChannel theirAddress msg
-        let newConn = Connection {
-                   send = apiSend tr lep theirAddress cId
-                 , close = apiClose tr lep theirAddress cId
+  try . asyncWhenCancelled close $ do
+    lst <- takeMVar localState
+    putMVar localState lst
+    case lst of
+      LocalEndPointClosed ->
+        throwIO $ TransportError ConnectFailed "apiConnect: LocalEndPointClosed"
+      LocalEndPointNoAcceptConections ->
+        throw $ userError "apiConnect: local endpoint doesn't accept connections."
+      LocalEndPointValid ValidLocalEndPointState{..} -> do
+        if ourAddress == theirAddress
+        then connectToSelf lep
+        else do
+          (rep, isNew) <- findRemoteEndPoint lep theirAddress
+          let cId = remoteId rep
+          print $ "apiConnect cId: " ++ show cId
+          print $ "apiConnect new: " ++ show isNew
+          when isNew $ do
+              let msg = MessageInitConnection ourAddress cId reliability
+              publish _localChannel theirAddress msg
+          return Connection {
+                    send = apiSend tr lep theirAddress cId
+                  , close = apiClose tr lep theirAddress cId
                  }
-        return (LocalEndPointValid vst, newConn)
 
 --------------------------------------------------------------------------------
 -- | Find a remote endpoint. If the remote endpoint does not yet exist we
@@ -299,7 +301,6 @@ connectToSelf lep@LocalEndPoint{..} = do
     let ourEndPoint = localAddress
     (rep, _) <- findRemoteEndPoint lep ourEndPoint
     let cId = remoteId rep
-    print cId
     withValidLocalState_ lep $ \ValidLocalEndPointState{..} ->
       writeChan _localChan $ ConnectionOpened cId ReliableOrdered ourEndPoint
     return Connection { 
@@ -391,6 +392,8 @@ apiCloseTransport is =
   modifyMVar_ (istate_tstate is) $ \tst -> case tst of
     TransportClosed -> return TransportClosed
     TransportValid (ValidTransportState cnn mp) -> do
+      print "Before closing all"
       traverse_ (apiCloseEndPoint is) mp
+      print "After closing all endpoints"
       AMQP.closeConnection cnn
       return TransportClosed

@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 import System.Environment (getArgs)
 import Network.Transport
-import Network.Transport.AMQP (createTransport, AMQPTransport(..))
+import Network.Transport.AMQP (createTransport, AMQPParameters(..))
 import Network.AMQP (openChannel, openConnection)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar, newMVar, readMVar, modifyMVar_, modifyMVar)
 import Control.Concurrent (forkIO)
@@ -82,9 +82,8 @@ main :: IO ()
 main = do
   server:_ <- getArgs
   conn <- openConnection "localhost" "/" "guest" "guest"
-  ch <- openChannel conn
-  let amqpTransport = AMQPTransport conn ch Nothing
-  let transport = createTransport amqpTransport
+  let amqpTransport = AMQPParameters conn "multicast" Nothing
+  transport <- createTransport amqpTransport
   Right endpoint <- newEndPoint transport
   clientDone <- newEmptyMVar
 
