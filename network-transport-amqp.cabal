@@ -45,7 +45,21 @@ library
 
 Test-Suite amqp-tests
   type:               exitcode-stdio-1.0
-  main-is:            Tests.hs
+  main-is:            TestAMQP.hs
+  build-depends:      base >= 4.4 && < 5,
+                      network-transport >= 0.4,
+                      network-transport-amqp,
+                      amqp,
+                      tasty,
+                      tasty-hunit,
+                      network-transport-tests >= 0.1.0.1
+  ghc-options:        -Wall -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
+  hs-source-dirs:     tests
+  default-language:   Haskell2010
+
+Test-Suite api-tests
+  type:               exitcode-stdio-1.0
+  main-is:            TestAPI.hs
   build-depends:      base >= 4.4 && < 5,
                       network-transport >= 0.4,
                       network-transport-amqp,

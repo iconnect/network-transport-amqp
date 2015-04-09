@@ -27,9 +27,8 @@ main = defaultMain $
 newTransport :: IO Transport
 newTransport = do
   conn <- openConnection "localhost" "/" "guest" "guest"
-  ch <- openChannel conn
-  let amqpTransport = AMQPTransport conn ch (Just "chat-server-example")
-  return $ createTransport amqpTransport
+  let amqpTransport = AMQPParameters conn "simple-multicast" Nothing
+  createTransport amqpTransport
 
 test_simple :: IO ()
 test_simple = do
