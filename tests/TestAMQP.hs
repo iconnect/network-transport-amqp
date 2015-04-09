@@ -22,9 +22,9 @@ testTransportCompliance newTransport = do
   runTests
     [ ("PingPong",              testPingPong transport numPings)
       , ("EndPoints",             testEndPoints transport numPings)
---    , ("Connections",           testConnections transport numPings)
---    , ("CloseOneConnection",    testCloseOneConnection transport numPings)
-      , ("CloseOneDirection",     testCloseOneDirection transport numPings)
+--     , ("Connections",           testConnections transport numPings)
+--      , ("CloseOneConnection",    testCloseOneConnection transport numPings)
+--     , ("CloseOneDirection",     testCloseOneDirection transport numPings)
 --    , ("CloseReopen",           testCloseReopen transport numPings)
 -- invariant violated    , ("ParallelConnects",      testParallelConnects transport 10)
 --   , ("SendAfterClose",        testSendAfterClose transport 100)

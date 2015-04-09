@@ -128,7 +128,7 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
               cleanupRemoteConnection tr lep theirAddr
               writeChan _localChan $ ConnectionClosed theirId
           Right (MessageEndPointClose theirAddr theirId) -> do
-              unless (theirAddr == localAddress) $ do
+              unless (localAddress == theirAddr) $ do
                 cleanupRemoteConnection tr lep theirAddr
                 print "MessageEndPointClose"
                 writeChan _localChan $ ConnectionClosed theirId
@@ -178,20 +178,17 @@ apiCloseEndPoint AMQPInternalState{..} lep@LocalEndPoint{..} = do
   let ourAddress = localAddress
 
   -- Notify all the remoters this EndPoint is dying.
-  print "aCe: before modifyMVar"
   modifyMVar_ localState $ \lst -> case lst of
     LocalEndPointValid vst@ValidLocalEndPointState{..} -> do
       print (Map.keys $ vst ^. localConnections)
       forM_ (Map.toList $ vst ^. localConnections) $ \(theirAddress, rep) ->
         publish _localChannel theirAddress (MessageEndPointClose ourAddress (remoteId rep))
 
-      print "after publish"
       -- Close the given connection
       forM_ evts (writeChan _localChan)
       let queue = fromAddress localAddress
       _ <- AMQP.deleteQueue _localChannel queue
       AMQP.deleteExchange _localChannel queue
-      print "before yielding localEPcl"
       return LocalEndPointClosed
     _ -> return LocalEndPointClosed
 

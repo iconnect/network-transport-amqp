@@ -41,8 +41,8 @@ test_simple = do
     Right _   <- send c2 ["321"]
     close c1
     close c2
-    [ConnectionOpened 1 ReliableOrdered _, Received 1 ["321"], ConnectionClosed 1] <- replicateM 3 $ receive ep1
-    [ConnectionOpened 1 ReliableOrdered _, Received 1 ["123"], ConnectionClosed 1] <- replicateM 3 $ receive ep2
+    [ConnectionOpened _ ReliableOrdered _, Received _ ["321"], ConnectionClosed _] <- replicateM 3 $ receive ep1
+    [ConnectionOpened _ ReliableOrdered _, Received _ ["123"], ConnectionClosed _] <- replicateM 3 $ receive ep2
     closeTransport transport
 
 --test_connectionBreak :: IO ()
