@@ -246,9 +246,6 @@ apiConnect tr@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliabili
       LocalEndPointClosed ->
         throwIO $ TransportError ConnectFailed "apiConnect: LocalEndPointClosed"
       LocalEndPointValid ValidLocalEndPointState{..} -> do
-        if (localAddress == theirAddress)
-           then connectToSelf lep
-        else do
           (rep, isNew) <- findRemoteEndPoint lep theirAddress
           let cId = remoteId rep
           print $ "apiConnect cId: " ++ show cId
@@ -256,9 +253,10 @@ apiConnect tr@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliabili
           when isNew $ do
               let msg = MessageInitConnection ourAddress cId reliability
               publish _localChannel theirAddress msg
+          connAlive <- newIORef True
           return Connection {
-                    send = apiSend tr lep theirAddress cId
-                  , close = apiClose tr lep theirAddress cId
+                    send = apiSend tr lep theirAddress cId connAlive
+                  , close = apiClose tr lep theirAddress cId connAlive
                  }
 
 --------------------------------------------------------------------------------
@@ -299,7 +297,6 @@ newValidRemoteEndpoint LocalEndPoint{..} ep = do
   return $ RemoteEndPoint ep cId var 0
 
 --------------------------------------------------------------------------------
--- TODO: Deal with exceptions.
 connectToSelf :: LocalEndPoint -> IO Connection
 connectToSelf lep@LocalEndPoint{..} = do
     let ourEndPoint = localAddress
@@ -359,18 +356,23 @@ apiSend :: AMQPInternalState
         -> LocalEndPoint
         -> EndPointAddress
         -> ConnectionId
-        -> [ByteString] -> IO (Either (TransportError SendErrorCode) ())
-apiSend is LocalEndPoint{..} their connId msgs = do
-  try . withMVar (istate_tstate is) $ \tst -> case tst of
-    TransportClosed -> 
-      throwIO $ TransportError SendFailed "apiSend: TransportClosed"
-    TransportValid _ -> withMVar localState $ \lst -> case lst of
-      (LocalEndPointValid vst@ValidLocalEndPointState{..}) -> case Map.lookup their (vst ^. localConnections) of
-        Nothing  -> throwIO $ TransportError SendFailed "apiSend: address not in local connections"
-        Just rep -> withMVar (remoteState rep) $ \rst -> case rst of
-          RemoteEndPointClosed -> throwIO $ TransportError SendFailed "apiSend: Connection closed"
-          RemoteEndPointValid ->  publish _localChannel their (MessageData connId msgs)
-      _ -> throwIO $ TransportError SendFailed "apiSend: LocalEndPointClosed"
+        -> IORef Bool
+        -> [ByteString] 
+        -> IO (Either (TransportError SendErrorCode) ())
+apiSend is LocalEndPoint{..} their connId connAlive msgs = try $ do
+  isAlive <- readIORef connAlive
+  case isAlive of
+    False -> throwIO $ TransportError SendClosed "apiSend: connAlive = False"
+    True  -> withMVar (istate_tstate is) $ \tst -> case tst of
+      TransportClosed -> 
+        throwIO $ TransportError SendFailed "apiSend: TransportClosed"
+      TransportValid _ -> withMVar localState $ \lst -> case lst of
+        (LocalEndPointValid vst@ValidLocalEndPointState{..}) -> case Map.lookup their (vst ^. localConnections) of
+            Nothing  -> throwIO $ TransportError SendFailed "apiSend: address not in local connections"
+            Just rep -> withMVar (remoteState rep) $ \rst -> case rst of
+              RemoteEndPointClosed -> throwIO $ TransportError SendFailed "apiSend: Connection closed"
+              RemoteEndPointValid ->  publish _localChannel their (MessageData connId msgs)
+        _ -> throwIO $ TransportError SendFailed "apiSend: LocalEndPointClosed"
 
 --------------------------------------------------------------------------------
 -- | Change the status of the `RemoteEndPoint` to be closed. If the
@@ -379,14 +381,20 @@ apiClose :: AMQPInternalState
          -> LocalEndPoint
          -> EndPointAddress
          -> ConnectionId
+         -> IORef Bool
          -> IO ()
-apiClose tr@AMQPInternalState{..} lep@LocalEndPoint{..} ep connId = do
+apiClose tr@AMQPInternalState{..} lep@LocalEndPoint{..} ep connId connAlive = do
   print "Inside API Close"
-  let ourAddress = localAddress
-  print "apiClose: after closeRemote"
-  withValidLocalState_ lep $ \ValidLocalEndPointState{..} ->
-    publish _localChannel ep (MessageCloseConnection ourAddress connId)
-  print "apiClose: after publishing"
+  isAlive <- readIORef connAlive
+  case isAlive of
+    False -> throwIO $ TransportError SendClosed "apiClose: connAlive = False"
+    True  -> do
+      let ourAddress = localAddress
+      print "apiClose: after closeRemote"
+      withValidLocalState_ lep $ \ValidLocalEndPointState{..} ->
+          publish _localChannel ep (MessageCloseConnection ourAddress connId)
+      print "apiClose: after publishing"
+      writeIORef connAlive False
 
 --------------------------------------------------------------------------------
 createTransport :: AMQPParameters -> IO Transport
