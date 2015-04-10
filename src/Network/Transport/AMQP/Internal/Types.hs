@@ -14,6 +14,7 @@ import Data.Map.Strict (Map)
 import GHC.Generics (Generic)
 import Data.ByteString (ByteString)
 import Data.Serialize
+import Data.IORef
 import Network.Transport
 import Control.Concurrent.MVar
 import Control.Exception
@@ -58,6 +59,16 @@ data LocalEndPoint = LocalEndPoint
   }
 
 --------------------------------------------------------------------------------
+data ValidLocalEndPointState = ValidLocalEndPointState
+  {
+    _localChan         :: !(Chan Event)
+  , _localChannel      :: AMQP.Channel
+  , _localCounter      :: !Int
+  , _localConnections  :: !(Map ConnectionId RemoteEndPoint)
+  , _localRemotes      :: !(Map EndPointAddress RemoteEndPoint)
+  }
+
+--------------------------------------------------------------------------------
 data LocalEndPointState =
     LocalEndPointValid !ValidLocalEndPointState
   | LocalEndPointNoAcceptConections
@@ -66,24 +77,21 @@ data LocalEndPointState =
 --------------------------------------------------------------------------------
 data RemoteEndPoint = RemoteEndPoint
   { remoteAddress :: !EndPointAddress
-  , remoteId      :: !ConnectionId
   , remoteState   :: !(MVar RemoteEndPointState)
-  , remoteOutgoingConnections :: !Int
+  , remoteAlive  :: !(IORef Bool)
   }
 
 --------------------------------------------------------------------------------
 data RemoteEndPointState
-  = RemoteEndPointValid
+  = RemoteEndPointValid ValidRemoteEndPointState
   | RemoteEndPointClosed
 
---------------------------------------------------------------------------------
-data ValidLocalEndPointState = ValidLocalEndPointState
-  {
-    _localChan         :: !(Chan Event)
-  , _localChannel      :: AMQP.Channel
-  , _localConnections  :: !(Map EndPointAddress RemoteEndPoint)
-  }
+data ValidRemoteEndPointState = ValidRemoteEndPointState {
+    _remotePendingConnections :: !(Map ConnectionId EndPointAddress)
+  , _remoteOutgoingCount  :: !Int
+}
 
+makeLenses ''ValidRemoteEndPointState
 makeLenses ''ValidLocalEndPointState
 
 --------------------------------------------------------------------------------
