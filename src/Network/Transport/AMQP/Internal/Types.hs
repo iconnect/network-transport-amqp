@@ -68,6 +68,7 @@ data RemoteEndPoint = RemoteEndPoint
   { remoteAddress :: !EndPointAddress
   , remoteId      :: !ConnectionId
   , remoteState   :: !(MVar RemoteEndPointState)
+  , remoteOutgoingConnections :: !Int
   }
 
 --------------------------------------------------------------------------------
