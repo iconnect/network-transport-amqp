@@ -60,7 +60,6 @@ data LocalEndPoint = LocalEndPoint
 --------------------------------------------------------------------------------
 data LocalEndPointState =
     LocalEndPointValid !ValidLocalEndPointState
-  | LocalEndPointNoAcceptConections
   | LocalEndPointClosed
 
 --------------------------------------------------------------------------------

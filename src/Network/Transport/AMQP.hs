@@ -18,6 +18,7 @@ import Data.UUID.V4
 import Data.List (foldl1')
 import Data.UUID (toString, toWords)
 import Data.Bits
+import Data.IORef
 import qualified Data.Map.Strict as Map
 import Data.ByteString (ByteString)
 import Data.Foldable
@@ -147,7 +148,6 @@ withValidLocalState_ :: LocalEndPoint
 withValidLocalState_ LocalEndPoint{..} f = withMVar localState $ \st ->
   case st of
     LocalEndPointClosed -> return ()
-    LocalEndPointNoAcceptConections -> return ()
     LocalEndPointValid v -> f v
 
 --------------------------------------------------------------------------------
@@ -166,22 +166,24 @@ apiCloseEndPoint :: AMQPInternalState
                  -> LocalEndPoint
                  -> IO ()
 apiCloseEndPoint AMQPInternalState{..} LocalEndPoint{..} = do
+  print "Inside apiCloseEndPoint"
   let ourAddress = localAddress
 
   -- Notify all the remoters this EndPoint is dying.
   old <- readMVar localState
   case old of
     LocalEndPointClosed -> return ()
-    LocalEndPointNoAcceptConections -> return ()
     LocalEndPointValid vst@ValidLocalEndPointState{..} -> do
-      print (Map.keys $ vst ^. localConnections)
+      -- Close the given connection
+      writeChan _localChan EndPointClosed
+      print $ "apiCloseEndPoint: connections :" ++ show (Map.keys $ vst ^. localConnections)
+      print $ "apiCloseEndPoint: my address :" ++ show localAddress
       forM_ (Map.toList $ vst ^. localConnections) $ \(theirAddress, rep) -> do
+        print $ "Same address? " ++ show (theirAddress == localAddress)
         withMVar (remoteState rep) $ \rst -> case rst of
           RemoteEndPointClosed -> return ()
           _ -> publish _localChannel theirAddress (MessageEndPointClose ourAddress (remoteId rep))
 
-      -- Close the given connection
-      writeChan _localChan EndPointClosed
       let queue = fromAddress localAddress
       _ <- AMQP.deleteQueue _localChannel queue
       AMQP.closeChannel _localChannel
@@ -243,9 +245,10 @@ apiConnect tr@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliabili
     case lst of
       LocalEndPointClosed ->
         throwIO $ TransportError ConnectFailed "apiConnect: LocalEndPointClosed"
-      LocalEndPointNoAcceptConections ->
-        throw $ userError "apiConnect: local endpoint doesn't accept connections."
       LocalEndPointValid ValidLocalEndPointState{..} -> do
+        if (localAddress == theirAddress)
+           then connectToSelf lep
+        else do
           (rep, isNew) <- findRemoteEndPoint lep theirAddress
           let cId = remoteId rep
           print $ "apiConnect cId: " ++ show cId
@@ -268,8 +271,6 @@ findRemoteEndPoint lep@LocalEndPoint{..} theirAddr =
   modifyMVar localState $ \lst -> case lst of
     LocalEndPointClosed -> 
       throwIO $ TransportError ConnectFailed "findRemoteEndPoint: LocalEndPointClosed"
-    LocalEndPointNoAcceptConections ->
-      throw $ userError "findRemoteEndpoint: local endpoint doesn't accept connections."
     LocalEndPointValid v ->
       case Map.lookup theirAddr (v ^. localConnections) of
           -- TODO: Check if the RemoteEndPoint is closed.
@@ -306,33 +307,38 @@ connectToSelf lep@LocalEndPoint{..} = do
     let cId = remoteId rep
     withValidLocalState_ lep $ \ValidLocalEndPointState{..} ->
       writeChan _localChan $ ConnectionOpened cId ReliableOrdered ourEndPoint
+    connAlive <- newIORef True
     return Connection { 
-        send  = selfSend cId
-      , close = selfClose cId
+        send  = selfSend cId connAlive
+      , close = selfClose cId connAlive
     }
   where
     selfSend :: ConnectionId
+             -> IORef Bool
              -> [ByteString]
              -> IO (Either (TransportError SendErrorCode) ())
-    selfSend connId msg =
-      try . withMVar localState $ \st -> case st of
-        LocalEndPointValid ValidLocalEndPointState{..} -> do
+    selfSend connId connAlive msg = try $ do
+      isAlive <- readIORef connAlive
+      case isAlive of
+        False -> throwIO $ TransportError SendClosed "selfSend: Connections no more."
+        True  -> withMVar localState $ \st -> case st of
+          LocalEndPointValid ValidLocalEndPointState{..} -> do
             writeChan _localChan (Received connId msg)
-        LocalEndPointNoAcceptConections -> do
-          throwIO $ TransportError SendClosed "selfSend: Connections no more."
-        LocalEndPointClosed ->
-          throwIO $ TransportError SendFailed "selfSend: Connection closed"
+          LocalEndPointClosed ->
+            throwIO $ TransportError SendFailed "selfSend: Connection closed"
 
-    selfClose :: ConnectionId -> IO ()
-    selfClose connId = do
-      modifyMVar_ localState $ \st -> case st of
-        LocalEndPointValid ValidLocalEndPointState{..} -> do
-          writeChan _localChan (ConnectionClosed connId)
-          return LocalEndPointNoAcceptConections
-        LocalEndPointNoAcceptConections ->
-          throwIO $ TransportError SendFailed "selfClose: No connections accepted"
-        LocalEndPointClosed -> 
-          throwIO $ TransportError SendClosed "selfClose: Connection closed"
+    selfClose :: ConnectionId -> IORef Bool -> IO ()
+    selfClose connId connAlive = do
+      isAlive <- readIORef connAlive
+      case isAlive of
+        False -> throwIO $ TransportError SendClosed "selfSend: Connections no more."
+        True -> do
+          writeIORef connAlive False
+          withMVar localState $ \st -> case st of
+            LocalEndPointValid ValidLocalEndPointState{..} -> do
+                writeChan _localChan (ConnectionClosed connId)
+            LocalEndPointClosed -> 
+                throwIO $ TransportError SendClosed "selfClose: Connection closed"
 
 --------------------------------------------------------------------------------
 publish :: AMQP.Channel 
