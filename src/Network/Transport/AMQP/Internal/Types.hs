@@ -159,7 +159,7 @@ data AMQPMessage
   = MessageConnect !EndPointAddress -- ^ Connection greeting
   | MessageInitConnection !EndPointAddress !ConnectionId !Reliability
   | MessageInitConnectionOk !EndPointAddress !ConnectionId !ConnectionId
-  | MessageCloseConnection !EndPointAddress !ConnectionId
+  | MessageCloseConnection !ConnectionId
   | MessageData !ConnectionId ![ByteString]
   | MessageEndPointClose   !EndPointAddress !Bool
   | MessageEndPointCloseOk !EndPointAddress
@@ -172,7 +172,8 @@ instance Serialize Reliability
 instance Serialize AMQPMessage
 
 data InvariantViolated = 
-  InvariantViolated InvariantViolation
+    InvariantViolated InvariantViolation
+  | IncorrectState String
   deriving Show
 
 data InvariantViolation =

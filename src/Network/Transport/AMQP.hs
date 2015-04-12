@@ -30,8 +30,9 @@ import qualified Data.ByteString as B
 import Data.String.Conv
 import Data.Serialize
 import Network.Transport
-import Network.Transport.Internal (asyncWhenCancelled)
-import Control.Concurrent (yield)
+import Network.Transport.Internal (mapIOException, asyncWhenCancelled)
+import Control.Concurrent (yield, threadDelay)
+import Control.Concurrent.Async as Async
 import Control.Concurrent.MVar
 import Control.Monad
 import Control.Exception
@@ -51,15 +52,15 @@ decode' :: AMQP.Message -> Either String AMQPMessage
 decode' = decodeLazy . AMQP.msgBody
 
 --------------------------------------------------------------------------------
-onValidEndPoint :: LocalEndPoint -> (ValidLocalEndPoint -> IO ()) -> IO ()
-onValidEndPoint lep f = withMVar (localEndPointState lep) $ \case
-   LocalEndPointValid v -> f v
+onValidEndPoint :: LocalEndPoint -> (LocalEndPointState -> IO ()) -> IO ()
+onValidEndPoint lep f = withMVar (localState lep) $ \case
+   ValidLocalEndPointState v -> f v
    _ -> return ()
 
 --------------------------------------------------------------------------------
-onValidRemote :: RemoteEndPoint -> (ValidRemoteEndPoint -> IO ()) -> IO ()
-onValidRemote rep f = withMVar (remoteEndPointState rep) $ \case
-  RemoteEndPointValid v -> f v
+onValidRemote :: RemoteEndPoint -> (RemoteEndPointState -> IO ()) -> IO ()
+onValidRemote rep f = withMVar (remoteState rep) $ \case
+  ValidRemoteEndPointState v -> f v
   _ -> return ()
 
 --------------------------------------------------------------------------------
@@ -130,8 +131,10 @@ endPointCreate is@AMQPInternalState{..} = do
 
 
 --------------------------------------------------------------------------------
-toExchangeName :: EndPointAddress -> ConnectionId -> T.Text
-toExchangeName eA cId = fromAddress eA <> ":" <> T.pack (show cId)
+toExchangeName :: EndPointAddress -> IO T.Text
+toExchangeName eA = do
+  uuid <- toString <$> nextRandom
+  fromAddress eA <> ":" <> T.pack uuid
 
 
 --------------------------------------------------------------------------------
@@ -149,41 +152,41 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
               writeChan _localChan $ Received cId rawMsg
           Right v@(MessageConnect theirAddress) -> do
               print v
-              void $ getOrCreateRemoteEndPoint theirAddress
-          Right v@(MessageInitConnection theirAddr theirId rel) -> do
+              void $ createOrGetRemoteEndPoint tr lep theirAddress
+          Right v@(MessageInitConnection theirAddress theirId rel) -> do
               print v
               modifyMVar localState $ \case
                 LocalEndPointValid vst@ValidLocalEndPointState -> do
                     case Map.lookup theirAddress localConnections of
                       Nothing -> return (LocalEndPointValid v
-                                        , thowIO $ InvariantViolation (RemoteEndPointLookupFailed theirAddress))
+                                        , throwIO $ InvariantViolated (RemoteEndPointLookupFailed theirAddress))
                       Just rep -> modifyMVar (remoteState rep) $ \case
                         RemoteEndPointFailed ->
-                          throwIO $ InvariantViolation (RemoteEndPointMustBeValid theirAddress)
+                          throwIO $ InvariantViolated (RemoteEndPointMustBeValid theirAddress)
                         RemoteEndPointClosed ->
-                          throwIO $ InvariantViolation (RemoteEndPointMustBeValid theirAddress)
+                          throwIO $ InvariantViolated (RemoteEndPointMustBeValid theirAddress)
                         RemoteEndPointClosing ->
-                          throwIO $ InvariantViolation (RemoteEndPointMustBeValid theirAddress)
+                          throwIO $ InvariantViolated (RemoteEndPointMustBeValid theirAddress)
                         w@RemoteEndPointValid{} -> do
-                          conn <- AMQPConnection <$> pure ourEp
+                          conn <- AMQPConnection <$> pure _localAddress
                                                  <*> pure rep
                                                  <*> pure rel
                                                  <*> newMVar (AMQPConnectionValid $ ValidAMQPConnection Nothing i)
                                                  <*> newEmptyMVar
-                          w' <- register (succ i) w
+                          w' <- registerRemoteEndPoint (succ i) w
                           return ( w'
-                                 , ( LocalEndPointValid (localConnections ^= Counter (succ i) (Map.insert (succ i) conn m) $ v)
+                                 , ( LocalEndPointValid (set localConnections (Counter (succ i) (Map.insert (succ i) conn m)) $ v)
                                    , return ())
                                  )
                         z@(RemoteEndPointPending w) -> do
-                          conn <- AMQPConnection <$> pure ourEp
+                          conn <- AMQPConnection <$> pure _localAddress
                                                  <*> pure rep
                                                  <*> pure rel
                                                  <*> newMVar (AMQPConnectionValid $ ValidAMQPConnection Nothing i)
                                                  <*> newEmptyMVar
-                          modifyIORef w (\xs -> (register (succ i))  : xs)
+                          modifyIORef w (\xs -> (registerRemoteEndPoint (succ i))  : xs)
                           return ( z
-                                 , ( LocalEndPointValid (localConnections ^= Counter (succ i) (Map.insert (succ i) conn m) $ v)
+                                 , ( LocalEndPointValid (set localConnections (Counter (succ i) (Map.insert (succ i) conn m)) $ v)
                                    , return ())
                                  )
 
@@ -195,7 +198,7 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
               registerRemoteEndPoint i RemoteEndPointFailed = do
                 writeChan _localChan (ConnectionOpened i rel theirAddress)
                 writeChan _localChan (ConnectionClosed i)
-                return RemotEndPointFailed
+                return RemoteEndPointFailed
               registerRemoteEndPoint i RemoteEndPointClosed = do
                 writeChan _localChan (ConnectionOpened i rel theirAddress)
                 writeChan _localChan (ConnectionClosed i)
@@ -205,9 +208,9 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
                 writeChan _localChan (ConnectionClosed i)
                 return $ RemoteEndPointClosing x
               registerRemoteEndPoint _ RemoteEndPointPending{} = 
-                throwIO $ InvariantViolation $ RemoteEndPointCannotBePending (theirAddress)
-              registerRemoteEndPoint i (RemoteEndPointValid v@(ValidRemoteEndPoint exg _ s _)) = do
-                publish _localChannel exg (MessageInitConnectionOk ourAddr theirId i)
+                throwIO $ InvariantViolated $ RemoteEndPointCannotBePending (theirAddress)
+              registerRemoteEndPoint i (RemoteEndPointValid v@(ValidRemoteEndPointState exg _ s _)) = do
+                publish _localChannel exg (MessageInitConnectionOk _localAddress theirId i)
                 writeChan _localChan (ConnectionOpened i rel theirAddress)
                 return $ RemoteEndPointValid v { _remoteIncomingConnections = Set.insert i s }
 
@@ -222,13 +225,13 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
                     Nothing  -> return (LocalEndPointValid v, return ())
                     Just conn -> do
                       old <- swapMVar (connectionState conn) AMQPConnectionFailed
-                      let setter = over localEndPointConnections (Map.delete idx)
+                      let setter = over localConnections (Map.delete idx)
                       return ( LocalEndPointValid $ setter v
                              , case old of
                                  AMQPConnectionFailed -> return ()
                                  AMQPConnectionInit -> return  () -- throwIO InvariantViolation
                                  AMQPConnectionClosed -> return ()
-                                 AMQPConnectionValid (ValidZMQConnection _ _) -> do
+                                 AMQPConnectionValid (ValidAMQPConnection{}) -> do
                                     writeChan _localChan (ConnectionClosed idx)
                                     connectionCleanup (_connectionRemoteEndPoint conn) idx)
               LocalEndPointClosed -> return (LocalEndPointClosed, return ())
@@ -244,25 +247,25 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
                   Just rep -> modifyMVar (remoteState rep) $ \case
                     RemoteEndPointFailed -> return (RemoteEndPointFailed, return ())
                     RemoteEndPointClosed -> 
-                      throwIO $ InvariantViolation $ RemoteEndPointShouldBeValidOrClosed theirAddress
+                      throwIO $ InvariantViolated $ RemoteEndPointShouldBeValidOrClosed theirAddress
                     RemoteEndPointClosing{} -> 
-                      throwM $ InvariantViolation  $ RemoteEndPointShouldBeValidOrClosed theirAddress
-                    t@(RemoteEndPointValid (ValidRemoteEndPoint _ (Counter _ m) _ z)) -> return $
+                      throwIO $ InvariantViolated $ RemoteEndPointShouldBeValidOrClosed theirAddress
+                    t@(RemoteEndPointValid (ValidRemoteEndPointState exg (Counter x m) s z)) -> return $
                       case ourId `Map.lookup` m of
                           Nothing -> (t, return ()) -- TODO: send message to the hostv
                           Just c  ->
-                            (RemoteEndPointValid (ValidRemoteEndPoint exg (Counter x (ourId `Map.delete` m)) s (z+1))
+                            (RemoteEndPointValid (ValidRemoteEndPointState exg (Counter x (ourId `Map.delete` m)) s (z+1))
                             , do modifyMVar_ (connectionState c) $ \case
                                    AMQPConnectionFailed -> return AMQPConnectionFailed
                                    AMQPConnectionInit -> return $ AMQPConnectionValid (ValidAMQPConnection (Just exg) theirId)
                                    AMQPConnectionClosed -> do
                                        publish exg (MessageCloseConnection theirId)
-                                       return ZMQConnectionClosed
+                                       return AMQPConnectionClosed
                                    AMQPConnectionValid _ -> 
-                                     throwIO $ InvariantViolation "RemoteEndPoint should be closed"
+                                     throwIO $ InvariantViolated (IncorrectState "RemoteEndPoint should be closed")
                                  void $ tryPutMVar (connectionReady c) ()
                             )
-                    RemoteEndPointPending p -> return (RemoteEndPointPending p, throwM $ InvariantViolation "RemoteEndPoint should be closed")
+                    RemoteEndPointPending p -> return (RemoteEndPointPending p, throwIO $ InvariantViolated (IncorrectState "RemoteEndPoint should be closed"))
               LocalEndPointClosed -> return $ return ()
 
           --
@@ -272,9 +275,9 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
             print v
             getRemoteEndPoint lep theirAddress >>=
               traverse_ (\rep -> do
-                onValidRemote rep $ \v@ValidRemoteEndPoint{..} ->
+                onValidRemote rep $ \v@ValidRemoteEndPointState{..} ->
                   publish _localChannel _remoteExchange (MessageEndPointCloseOk localAddress)
-                remoteEndPointClose True ourEp rep)
+                remoteEndPointClose True _localAddress rep)
 
           Right v@(MessageEndPointClose theirAddress False) -> do
             print v
@@ -283,21 +286,28 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
                 mst <- cleanupRemoteEndPoint lep rep Nothing
                 case mst of
                   Nothing -> return ()
-                  Just st -> do
-                    onValidEndPoint lep $ \v -> do
-                      atomically $ writeChan (v ^. localChan) $
+                  Just st -> onValidEndPoint lep $ \v -> do
+                    writeChan (v ^. localChan) $
                         ErrorEvent $ TransportError (EventConnectionLost theirAddress) "Exception on remote side"
                     closeRemoteEndPoint lep rep st)
 
+          --
+          -- MessageEndPointCloseOk
+          --
           Right v@(MessageEndPointCloseOk theirAddress) -> do
             print v
-            getRemoteEndPoint ourEp theirAddress >>=
+            getRemoteEndPoint _localAddress theirAddress >>=
               traverse_ (\rep -> do
                 state <- swapMVar (remoteState rep) RemoteEndPointClosed
                 closeRemoteEndPoint lep rep state)
 
     _ -> throwIO $ TransportError NewEndPointFailed "startReceiver: Endpoint was closed"
 
+--------------------------------------------------------------------------------
+-- TODO: Not sure it's needed in AMQP.
+-- | Close, all network connections.
+closeRemoteEndPoint :: LocalEndPoint -> RemoteEndPoint -> RemoteEndPointState -> IO ()
+closeRemoteEndPoint _ _ _ = return ()
 
 --------------------------------------------------------------------------------
 connectionCleanup :: RemoteEndPoint -> ConnectionId -> IO ()
@@ -340,6 +350,7 @@ apiCloseEndPoint AMQPInternalState{..} LocalEndPoint{..} = do
     TransportValid v@ValidTransportState{..} -> do
        return (TransportValid $ over tstateEndPoints (localAddress `Map.delete`) v)
 
+{-
 --------------------------------------------------------------------------------
 -- | Returns whether or not the `RemoteEndPoint` is now closed
 closeRemoteConnection :: AMQPInternalState
@@ -365,6 +376,7 @@ closeRemoteConnection AMQPInternalState{..} LocalEndPoint{..} theirAddress = do
   where
     decreaseConnections :: RemoteEndPoint -> RemoteEndPoint
     decreaseConnections v@RemoteEndPoint{..} = v { remoteOutgoingConnections = remoteOutgoingConnections - 1 }
+-}
 
 --------------------------------------------------------------------------------
 toAddress :: T.Text -> EndPointAddress
@@ -381,65 +393,122 @@ apiConnect :: AMQPInternalState
            -> Reliability      -- ^ Reliability (ignored)
            -> ConnectHints     -- ^ Hints
            -> IO (Either (TransportError ConnectErrorCode) Connection)
-apiConnect tr@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliability _ = do
+apiConnect is@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliability _ = do
   let ourAddress = localAddress
-  try . asyncWhenCancelled close $ do
-    lst <- takeMVar localState
-    putMVar localState lst
-    case lst of
-      LocalEndPointClosed ->
-        throwIO $ TransportError ConnectFailed "apiConnect: LocalEndPointClosed"
-      LocalEndPointValid ValidLocalEndPointState{..} -> do
-          (rep, isNew) <- findRemoteEndPoint lep theirAddress
-          let cId = remoteId rep
-          print $ "apiConnect cId: " ++ show cId
-          print $ "apiConnect new: " ++ show isNew
-          when isNew $ do
-              let msg = MessageInitConnection ourAddress cId reliability
-              publish _localChannel theirAddress msg
-          connAlive <- newIORef True
-          return Connection {
-                    send = apiSend tr lep theirAddress cId connAlive
-                  , close = apiClose tr lep theirAddress cId connAlive
-                 }
-
---------------------------------------------------------------------------------
--- | Find a remote endpoint. If the remote endpoint does not yet exist we
--- create it. Returns if the endpoint was new.
-findRemoteEndPoint :: LocalEndPoint
-                   -> EndPointAddress
-                   -> IO (RemoteEndPoint, Bool)
-findRemoteEndPoint lep@LocalEndPoint{..} theirAddr = 
-  modifyMVar localState $ \lst -> case lst of
-    LocalEndPointClosed -> 
-      throwIO $ TransportError ConnectFailed "findRemoteEndPoint: LocalEndPointClosed"
-    LocalEndPointValid v ->
-      case Map.lookup theirAddr (v ^. localConnections) of
-          -- TODO: Check if the RemoteEndPoint is closed.
-          Just r -> do
-            let newMap = Map.adjust increaseConnections theirAddr (v ^. localConnections)
-            return (LocalEndPointValid $ v { _localConnections = newMap }, (r, False))
-          Nothing -> do
-            newRem <- newValidRemoteEndpoint lep theirAddr
-            let newMap = Map.insert theirAddr newRem
-            return (LocalEndPointValid $ over localConnections newMap v, (newRem, True))
+  lst <- readMVar localState
+  case lst of
+    LocalEndPointValid v@ValidLocalEndPointState{..} -> do
+      try $ mapIOException (TransportError ConnectFailed . show) $ do
+        eRep <- createOrGetRemoteEndPoint is lep theirAddress
+        case eRep of
+          Left _ -> return $ Left $ TransportError ConnectFailed "LocalEndPoint is closed."
+          Right rep -> do
+            conn <- AMQPConnection <$> pure localAddress
+                                   <*> pure rep
+                                   <*> pure reliability
+                                   <*> newMVar AMQPConnectionInit
+                                   <*> newEmptyMVar
+            let apiConn = Connection
+                  { send = apiSend conn
+                  , close = apiClose conn
+                  }
+            modifyMVar (remoteState rep) $ \w -> case w of
+              RemoteEndPointClosed -> do
+                return ( RemoteEndPointClosed
+                       , return $ Left $ TransportError ConnectFailed "Transport is closed.")
+              RemoteEndPointClosing x -> do
+                return ( RemoteEndPointClosing x
+                       , return $ Left $ TransportError ConnectFailed "RemoteEndPoint closed.")
+              RemoteEndPointValid _ -> do
+                newState <- handshake _localChannel conn w
+                return (newState, waitReady conn apiConn)
+              RemoteEndPointPending z -> do
+                modifyIORef z (\zs -> handshake _localChannel conn : zs)
+                return ( RemoteEndPointPending z, waitReady conn apiConn)
+              RemoteEndPointFailed ->
+                return ( RemoteEndPointFailed
+                       , return $ Left $ TransportError ConnectFailed "RemoteEndPoint failed.")
+    _ -> throwIO $ TransportError ConnectFailed "apiConnect: LocalEndPointClosed"
   where
-    increaseConnections :: RemoteEndPoint -> RemoteEndPoint
-    increaseConnections v@RemoteEndPoint{..} = v { remoteOutgoingConnections = remoteOutgoingConnections + 1 }
+    waitReady conn apiConn = withMVar (connectionState conn) $ \case
+      AMQPConnectionInit{}   -> return $ yield >> waitReady conn apiConn
+      AMQPConnectionValid{}  -> return $ apiConn
+      AMQPConnectionFailed{} -> throwIO $ TransportError ConnectFailed "Connection failed."
+      AMQPConnectionClosed{} -> throwIO $ TransportError ConnectFailed "Connection closed"
+    handshake _ _ RemoteEndPointClosed      = return RemoteEndPointClosed
+    handshake _ _ RemoteEndPointPending{}   = 
+      throwIO $ TransportError ConnectFailed "Connection pending."
+    handshake _ _ (RemoteEndPointClosing x) = return $ RemoteEndPointClosing x
+    handshake _ _ RemoteEndPointFailed      = return RemoteEndPointFailed
+    handshake ch conn (RemoteEndPointValid (ValidRemoteEndPointState exg (Counter i m) s z)) = do
+        publish ch exg (MessageInitConnection localAddress i' reliability)
+        return $ RemoteEndPointValid (ValidRemoteEndPointState exg (Counter i' (Map.insert i' conn m)) s z)
+      where i' = succ i
 
 --------------------------------------------------------------------------------
-newValidRemoteEndpoint :: LocalEndPoint 
-                       -> EndPointAddress 
-                       -> IO RemoteEndPoint
-newValidRemoteEndpoint LocalEndPoint{..} ep = do
-  -- TODO: Experimental: do a bitwise operation on the UUID to generate
-  -- a random ConnectionId. Is this safe?
-  let queueAsWord64 = foldl1' (+) (map fromIntegral $ B.unpack . endPointAddressToByteString $ localAddress)
-  (a,b,c,d) <- toWords <$> nextRandom
-  let cId = fromIntegral (a .|. b .|. c .|. d) + queueAsWord64
-  var <- newMVar RemoteEndPointValid
-  return $ RemoteEndPoint ep cId var 0
+getRemoteEndPoint :: LocalEndPoint -> EndPointAddress -> IO (Maybe RemoteEndPoint)
+getRemoteEndPoint ourEp theirAddr = do
+    withMVar (localState ourEp) $ \case
+      LocalEndPointValid v -> return $ theirAddr `Map.lookup` _localRemotes v
+      LocalEndPointClosed  -> return Nothing
 
+--------------------------------------------------------------------------------
+createOrGetRemoteEndPoint :: AMQPInternalState
+                          -> LocalEndPoint
+                          -> EndPointAddress
+                          -> IO (Either String RemoteEndPoint)
+createOrGetRemoteEndPoint is@AMQPInternalState{..} ourEp theirAddr = do
+  modifyMVar (localState ourEp) $ \case
+    LocalEndPointValid v@ValidLocalEndPointState{..} -> do
+      opened <- readIORef _localOpened
+      if opened
+      then do
+        case v ^. localRemoteAt theirAddr of
+          Nothing -> create _localChannel v
+          Just rep -> do
+            withMVar (remoteState rep) $ \case
+              RemoteEndPointFailed -> create v
+              _ -> return (LocalEndPointValid v, return $ Right rep)
+      else return (LocalEndPointValid v, return $ Left $ IncorrectState "EndPointClosing")
+    LocalEndPointClosed ->
+      return  ( LocalEndPointClosed
+              , return $ Left $ IncorrectState "EndPoint is closed"
+              )
+  where
+    create amqpChannel v = do
+      newExchange <- toExchangeName theirAddr
+      AMQP.declareExchange amqpChannel $ AMQP.newExchange {
+          AMQP.exchangeName = newExchange
+          , AMQP.exchangeType = "direct"
+          , AMQP.exchangePassive = False
+          , AMQP.exchangeDurable = False
+          , AMQP.exchangeAutoDelete = True --TODO: Be prepared to change this.
+          }
+      AMQP.bindQueue amqpChannel (fromAddress ourAddr) newExchange mempty
+
+      state <- newMVar . RemoteEndPointPending =<< newIORef []
+      opened <- newIORef False
+      let rep = RemoteEndPoint theirAddr state opened
+      return ( LocalEndPointValid 
+             $ over localRemotes (Map.insert theirAddr rep) v
+             , initialize amqpChannel newExchange rep >> return (Right rep))
+
+    ourAddr = localAddress ourEp
+
+    initialize amqpChannel exg rep = do
+      -- TODO: Shall I need to worry about AMQP Finalising my exchange?
+      publish amqpChannel exg $ MessageConnect ourAddr
+      let v = ValidRemoteEndPointState exg (Counter 0 Map.empty) Set.empty 0
+      modifyMVar_ (remoteState rep) $ \case
+        RemoteEndPointPending p -> do
+            z <- foldM (\y f -> f y) (RemoteEndPointValid v) . Prelude.reverse =<< readIORef p
+            modifyIORef (remoteOpened rep) (const True)
+            return z
+        RemoteEndPointValid _   -> 
+          throwIO $ InvariantViolated (RemoteEndPointMustBeValid theirAddr)
+        RemoteEndPointClosed    -> return RemoteEndPointClosed
+        RemoteEndPointClosing j -> return (RemoteEndPointClosing j)
+        RemoteEndPointFailed    -> return RemoteEndPointFailed
 
 --------------------------------------------------------------------------------
 publish :: AMQP.Channel 
@@ -495,6 +564,31 @@ apiSend localChannel (AMQPConnection us them _ st _) m = try $ do
                  (EventConnectionLost (remoteAddress them)) "Exception on send."
 
 --------------------------------------------------------------------------------
+apiClose :: AMQP.Channel
+         -> AMQPConnection
+         -> IO ()
+apiClose amqpChannel (AMQPConnection _ them _ st _) = do
+  print "Inside API Close"
+  modifyMVar st $ \case
+    AMQPConnectionValid (ValidAMQPConnection _ idx) -> do
+      return (AMQPConnectionClosed, do
+        modifyMVar_ (remoteState them) $ \case
+          v@RemoteEndPointValid{}   -> notify idx v
+          v@(RemoteEndPointPending p) -> modifyIORef p (\xs -> notify idx : xs) >> return v
+          v -> return v
+        )
+    _ -> return (AMQPConnectionClosed, return ())
+  where
+    notify _ RemoteEndPointFailed    = return RemoteEndPointFailed
+    notify _ (RemoteEndPointClosing x) = return $ RemoteEndPointClosing x
+    notify _ RemoteEndPointClosed    = return RemoteEndPointClosed
+    notify _ RemoteEndPointPending{} = 
+      throwIO $ InvariantViolated (RemoteEndPointMustBeValid (remoteAddress them))
+    notify idx w@(RemoteEndPointValid (ValidRemoteEndPointState exg _ _ _)) = do
+      publish amqpChannel exg (MessageCloseConnection idx)
+      return w
+
+--------------------------------------------------------------------------------
 -- | Close all endpoint connections, return previous state in case
 -- if it was alive, for further cleanup actions.
 cleanupRemoteEndPoint :: LocalEndPoint
@@ -529,26 +623,43 @@ cleanupRemoteEndPoint lep rep actions = modifyMVar (localState lep) $ \case
     newState = RemoteEndPointFailed
 
 --------------------------------------------------------------------------------
--- | Change the status of the `RemoteEndPoint` to be closed. If the
--- `EndPoint` is already closed, we simply return.
-apiClose :: AMQPInternalState
-         -> LocalEndPoint
-         -> EndPointAddress
-         -> ConnectionId
-         -> IORef Bool
-         -> IO ()
-apiClose tr@AMQPInternalState{..} lep@LocalEndPoint{..} ep connId connAlive = do
-  print "Inside API Close"
-  isAlive <- readIORef connAlive
-  case isAlive of
-    False -> throwIO $ TransportError SendClosed "apiClose: connAlive = False"
-    True  -> do
-      let ourAddress = localAddress
-      print "apiClose: after closeRemote"
-      onValidEndPoint lep $ \ValidLocalEndPointState{..} ->
-          publish _localChannel ep (MessageCloseConnection ourAddress connId)
-      print "apiClose: after publishing"
-      writeIORef connAlive False
+remoteEndPointClose :: Bool -> LocalEndPoint -> RemoteEndPoint -> IO ()
+remoteEndPointClose silent lep rep = do
+  modifyIORef (remoteOpened rep) (const False)
+  join $ modifyMVar (remoteState rep) $ \o -> case o of
+    RemoteEndPointFailed        -> return (o, return ())
+    RemoteEndPointClosed        -> return (o, return ())
+    RemoteEndPointClosing (ClosingRemoteEndPoint _ l) -> return (o, void $ readMVar l)
+    RemoteEndPointPending _ -> 
+      closing (error "Pending actions should not be executed") o 
+      -- TODO: store socket, or delay
+    RemoteEndPointValid v   -> 
+      closing (remoteExchange v) o
+ where
+   closing exg old = do
+     lock <- newEmptyMVar
+     return (RemoteEndPointClosing (ClosingRemoteEndPoint exg lock), go lock old)
+   go lock old@(RemoteEndPointValid (ValidRemoteEndPointState c _ s i)) = do
+     -- close all connections
+     void $ cleanupRemoteEndPoint lep rep Nothing
+     withMVar (localState lep) $ \case
+       LocalEndPointClosed -> return ()
+       LocalEndPointValid v@ValidLocalEndPointState{..} -> do
+         -- notify about all connections close (?) do we really want it?
+         traverse_ (writeChan _localChan . ConnectionClosed) (Set.toList s)
+         -- if we have outgoing connections, then we have connection error
+         when (i > 0) $ writeChan _localChan
+                      $ ErrorEvent $ TransportError (EventConnectionLost (remoteAddress rep)) "Remote end point closed."
+     -- TODO: Is this safe to nest under the LocalEndPointValid branch?
+         -- notify other side about closing connection
+         unless silent $ do
+           publish _localChan c (MessageEndPointClose (localAddress lep) True)
+           yield
+           void $ Async.race (readMVar lock) (threadDelay 1000000)
+           void $ tryPutMVar lock ()
+           closeRemoteEndPoint lep rep old
+           return ()
+   go _ _ = return ()
 
 --------------------------------------------------------------------------------
 createTransport :: AMQPParameters -> IO Transport
