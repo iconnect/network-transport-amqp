@@ -41,8 +41,8 @@ data TransportState
 
 --------------------------------------------------------------------------------
 data ValidTransportState = ValidTransportState {
-    tstateConnection :: AMQP.Connection
-  , tstateEndPoints :: !(Map EndPointAddress LocalEndPoint)
+    _tstateConnection :: AMQP.Connection
+  , _tstateEndPoints :: !(Map EndPointAddress LocalEndPoint)
   }
 
 --------------------------------------------------------------------------------
@@ -83,6 +83,7 @@ data ValidLocalEndPointState = ValidLocalEndPointState
   , _localConnections  :: !(Map EndPointAddress RemoteEndPoint)
   }
 
+makeLenses ''ValidTransportState
 makeLenses ''ValidLocalEndPointState
 
 --------------------------------------------------------------------------------

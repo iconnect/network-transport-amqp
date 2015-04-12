@@ -9,3 +9,4 @@ dist
 .hub
 .DS_Store
 tests/.DS_Store
+tags
