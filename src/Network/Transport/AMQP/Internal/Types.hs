@@ -3,6 +3,7 @@
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE RankNTypes #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module Network.Transport.AMQP.Internal.Types
@@ -11,6 +12,7 @@ module Network.Transport.AMQP.Internal.Types
 import qualified Network.AMQP as AMQP
 import qualified Data.Text as T
 import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
 import Data.Set (Set)
 import Data.IORef
 import GHC.Generics (Generic)
@@ -22,6 +24,7 @@ import Control.Exception
 import Control.Concurrent.Chan (Chan)
 
 import Lens.Family2.TH
+import Lens.Family2
 
 --------------------------------------------------------------------------------
 -- Data Types
@@ -145,10 +148,10 @@ makeLenses ''Counter
 -- Lenses
 --
 --------------------------------------------------------------------------------
-localConnectionAt :: ConnectionId -> Lens' ValidLocalEndPointState (Maybe AMQPConnection)
+localConnectionAt :: Phantom f => ConnectionId -> LensLike' f ValidLocalEndPointState (Maybe AMQPConnection)
 localConnectionAt idx = localConnections . cntValue . to (Map.lookup idx)
 
-localRemoteAt :: EndPointAddress -> Lens' ValidLocalEndPointState (Maybe RemoteEndPoint)
+localRemoteAt :: Phantom f => EndPointAddress -> LensLike' f ValidLocalEndPointState (Maybe RemoteEndPoint)
 localRemoteAt eA = localRemotes . to (Map.lookup eA)
 
 --------------------------------------------------------------------------------
@@ -158,7 +161,7 @@ data AMQPMessage
   | MessageInitConnectionOk !EndPointAddress !ConnectionId !ConnectionId
   | MessageCloseConnection !EndPointAddress !ConnectionId
   | MessageData !ConnectionId ![ByteString]
-  | MessageEndPointClose   !EndPointAddress !ConnectionId
+  | MessageEndPointClose   !EndPointAddress !Bool
   | MessageEndPointCloseOk !EndPointAddress
   deriving (Show, Generic)
 
