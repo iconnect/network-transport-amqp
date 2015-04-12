@@ -316,6 +316,7 @@ connectionCleanup rep cid = modifyMVar_ (remoteState rep) $ \case
      RemoteEndPointValid $ over remoteIncomingConnections (Set.delete cid) v
    c -> return c
 
+{-
 --------------------------------------------------------------------------------
 apiCloseEndPoint :: AMQPInternalState
                  -> LocalEndPoint
@@ -349,6 +350,32 @@ apiCloseEndPoint AMQPInternalState{..} LocalEndPoint{..} = do
     TransportClosed  -> return TransportClosed
     TransportValid v@ValidTransportState{..} -> do
        return (TransportValid $ over tstateEndPoints (localAddress `Map.delete`) v)
+-}
+
+--------------------------------------------------------------------------------
+-- | Asynchronous operation, shutdown of the remote end point may take a while
+apiCloseEndPoint :: AMQPInternalState
+                 -> LocalEndPoint
+                 -> IO ()
+apiCloseEndPoint tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
+    -- we don't close endpoint here because other threads,
+    -- should be able to access local endpoint state
+    old <- readMVar _localState
+    case old of
+      LocalEndPointValid ValidLocalEndPointState{..} -> do
+        -- close channel, no events will be received
+        writeChan _localChan EndPointClosed
+        let queue = fromAddress localAddress
+        _ <- AMQP.deleteQueue _localChannel queue
+        AMQP.closeChannel _localChannel
+      LocalEndPointClosed -> return ()
+
+    void $ swapMVar _localState lep LocalEndPointClosed
+    modifyMVar_ _istate_tstate $ \case
+      TransportClosed  -> return TransportClosed
+      TransportValid v -> return
+        $ TransportValid (set tstateEndPoints (Map.delete (localAddress lep)) v)
+
 
 {-
 --------------------------------------------------------------------------------
