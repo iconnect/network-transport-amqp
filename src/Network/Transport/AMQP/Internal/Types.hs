@@ -11,6 +11,8 @@ module Network.Transport.AMQP.Internal.Types
 import qualified Network.AMQP as AMQP
 import qualified Data.Text as T
 import Data.Map.Strict (Map)
+import Data.Set (Set)
+import Data.IORef
 import GHC.Generics (Generic)
 import Data.ByteString (ByteString)
 import Data.Serialize
@@ -63,28 +65,91 @@ data LocalEndPointState =
   | LocalEndPointClosed
 
 --------------------------------------------------------------------------------
-data RemoteEndPoint = RemoteEndPoint
-  { remoteAddress :: !EndPointAddress
-  , remoteId      :: !ConnectionId
-  , remoteState   :: !(MVar RemoteEndPointState)
-  , remoteOutgoingConnections :: !Int
-  }
-
---------------------------------------------------------------------------------
-data RemoteEndPointState
-  = RemoteEndPointValid
-  | RemoteEndPointClosed
-
---------------------------------------------------------------------------------
 data ValidLocalEndPointState = ValidLocalEndPointState
   {
     _localChan         :: !(Chan Event)
   , _localChannel      :: AMQP.Channel
-  , _localConnections  :: !(Map EndPointAddress RemoteEndPoint)
+  , _localOpened       :: !(IORef Bool)
+  , _localConnections  :: !(Counter ConnectionId AMQPConnection)
+  , _localRemotes      :: !(Map EndPointAddress RemoteEndPoint)
   }
 
+--------------------------------------------------------------------------------
+data Counter a b = Counter 
+  { _cntNext :: !a
+  , _cntValue :: !(Map a b)
+  }
+
+--------------------------------------------------------------------------------
+data AMQPConnection = AMQPConnection 
+  { _connectionLocalEndPoint  :: !LocalEndPoint
+  , _connectionRemoteEndPoint :: !RemoteEndPoint
+  , _connectionReliability    :: !Reliability
+  , _connectionState          :: !(MVar AMQPConnectionState)
+  , _connectionReady          :: !(MVar ())
+  }
+
+newtype AMQPExchange = AMQPExchange T.Text
+
+--------------------------------------------------------------------------------
+data AMQPConnectionState = 
+    AMQPConnectionInit
+  | AMQPConnectionValid !ValidAMQPConnection
+  | AMQPConnectionClosed
+  | AMQPConnectionFailed
+
+--------------------------------------------------------------------------------
+data ValidAMQPConnection = ValidAMQPConnection
+  { _amqpExchange :: !(Maybe AMQPExchange)
+  , _amqpConnectionId :: !ConnectionId
+  }
+
+--------------------------------------------------------------------------------
+data RemoteEndPoint = RemoteEndPoint
+  { remoteAddress :: !EndPointAddress
+  , remoteState   :: !(MVar RemoteEndPointState)
+  , remoteOpened  :: !(IORef Bool)
+  }
+
+--------------------------------------------------------------------------------
+data ClosingRemoteEndPoint = ClosingRemoteEndPoint 
+  { _closingRemoteExchange :: !AMQPExchange
+  , _closingRemoteDone :: !(MVar ())
+  }
+
+--------------------------------------------------------------------------------
+data RemoteEndPointState
+  = RemoteEndPointValid ValidRemoteEndPointState
+  | RemoteEndPointClosed
+  | RemoteEndPointFailed
+  | RemoteEndPointPending (IORef [RemoteEndPointState -> IO RemoteEndPointState])
+  | RemoteEndPointClosing ClosingRemoteEndPoint
+
+--------------------------------------------------------------------------------
+data ValidRemoteEndPointState = ValidRemoteEndPointState
+  { _remoteExchange :: !AMQPExchange
+  , _remotePendingConnections :: !(Counter ConnectionId AMQPConnection)
+  , _remoteIncomingConnections :: !(Set ConnectionId)
+  , _remoteOutgoingCount :: !Int
+  }
+
+--------------------------------------------------------------------------------
 makeLenses ''ValidTransportState
 makeLenses ''ValidLocalEndPointState
+makeLenses ''ValidRemoteEndPointState
+makeLenses ''AMQPConnection
+makeLenses ''ValidAMQPConnection
+makeLenses ''Counter
+
+--------------------------------------------------------------------------------
+-- Lenses
+--
+--------------------------------------------------------------------------------
+localConnectionAt :: ConnectionId -> Lens' ValidLocalEndPointState (Maybe AMQPConnection)
+localConnectionAt idx = localConnections . cntValue . to (Map.lookup idx)
+
+localRemoteAt :: EndPointAddress -> Lens' ValidLocalEndPointState (Maybe RemoteEndPoint)
+localRemoteAt eA = localRemotes . to (Map.lookup eA)
 
 --------------------------------------------------------------------------------
 data AMQPMessage
@@ -108,7 +173,11 @@ data InvariantViolated =
   deriving Show
 
 data InvariantViolation =
-  EndPointNotInRemoteMap EndPointAddress
+    RemoteEndPointLookupFailed EndPointAddress
+  | RemoteEndPointCannotBePending EndPointAddress
+  | RemoteEndPointShouldBeValidOrClosed EndPointAddress
+  | RemoteEndPointMustBeValid EndPointAddress
+  | LocalEndPointMustBeValid EndPointAddress
   deriving Show
 
 instance Exception InvariantViolated
