@@ -71,7 +71,7 @@ data LocalEndPointState =
 data ValidLocalEndPointState = ValidLocalEndPointState
   {
     _localChan         :: !(Chan Event)
-  , _localChannel      :: AMQP.Channel
+  , _localChannel      :: !AMQP.Channel
   , _localOpened       :: !(IORef Bool)
   , _localConnections  :: !(Counter ConnectionId AMQPConnection)
   , _localRemotes      :: !(Map EndPointAddress RemoteEndPoint)
@@ -96,7 +96,7 @@ data AMQPConnection = AMQPConnection
   , _connectionReady          :: !(MVar ())
   }
 
-newtype AMQPExchange = AMQPExchange T.Text
+newtype AMQPExchange = AMQPExchange T.Text deriving (Show, Eq)
 
 --------------------------------------------------------------------------------
 data AMQPConnectionState = 
@@ -121,6 +121,7 @@ data RemoteEndPoint = RemoteEndPoint
 --------------------------------------------------------------------------------
 data ClosingRemoteEndPoint = ClosingRemoteEndPoint 
   { _closingRemoteExchange :: !AMQPExchange
+  , _closingRemoteChannel  :: !AMQP.Channel
   , _closingRemoteDone :: !(MVar ())
   }
 
@@ -135,6 +136,7 @@ data RemoteEndPointState
 --------------------------------------------------------------------------------
 data ValidRemoteEndPointState = ValidRemoteEndPointState
   { _remoteExchange :: !AMQPExchange
+  , _remoteChannel  :: !AMQP.Channel
   , _remotePendingConnections :: !(Counter ConnectionId AMQPConnection)
   , _remoteIncomingConnections :: !(Set ConnectionId)
   , _remoteOutgoingCount :: !Int

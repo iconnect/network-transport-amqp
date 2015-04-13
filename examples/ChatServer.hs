@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+import System.Environment (getArgs)
 import Network.Transport
 import Network.Transport.AMQP (createTransport, AMQPParameters(..))
 import Network.AMQP (openConnection)
@@ -9,13 +10,15 @@ import Control.Exception
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map (empty, insert, delete, elems)
 import qualified Data.ByteString.Char8 as BSC (pack)
+import qualified Data.Text as T
 
 import Data.Monoid
 
 main :: IO ()
 main = do
+  server:_ <- getArgs
   conn <- openConnection "localhost" "/" "guest" "guest"
-  let amqpTransport = AMQPParameters conn "multicast" (Just "chat-server-example")
+  let amqpTransport = AMQPParameters conn "multicast" (Just . T.pack $ server)
   transport <- createTransport amqpTransport
   Right endpoint  <- newEndPoint transport
 
