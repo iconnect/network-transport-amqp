@@ -364,7 +364,6 @@ apiConnect :: AMQPInternalState
            -> ConnectHints     -- ^ Hints
            -> IO (Either (TransportError ConnectErrorCode) Connection)
 apiConnect is@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliability _ = do
-  print "Inside apiConnect"
   let ourAddress = localAddress
   lst <- readMVar localState
   case lst of
@@ -374,7 +373,6 @@ apiConnect is@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliabili
         case eRep of
           Left _ -> return $ Left $ TransportError ConnectFailed "LocalEndPoint is closed."
           Right rep -> do
-            print "apiConnect: creating connection"
             conn <- AMQPConnection <$> pure lep
                                    <*> pure rep
                                    <*> pure reliability
@@ -392,7 +390,6 @@ apiConnect is@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliabili
                 return ( RemoteEndPointClosing x
                        , return $ Left $ TransportError ConnectFailed "RemoteEndPoint closed.")
               RemoteEndPointValid _ -> do
-                print "Performing handshake with remote"
                 newState <- handshake conn w
                 return (newState, waitReady conn apiConn)
               RemoteEndPointPending z -> do
@@ -414,7 +411,6 @@ apiConnect is@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliabili
     handshake _ (RemoteEndPointClosing x) = return $ RemoteEndPointClosing x
     handshake _ RemoteEndPointFailed      = return RemoteEndPointFailed
     handshake conn (RemoteEndPointValid (ValidRemoteEndPointState exg ch (Counter i m) s z)) = do
-        print $ "inside handshake: " ++ show exg
         publish ch exg (MessageInitConnection localAddress i' reliability)
         return $ RemoteEndPointValid (ValidRemoteEndPointState exg ch (Counter i' (Map.insert i' conn m)) s z)
       where i' = succ i
@@ -432,7 +428,6 @@ createOrGetRemoteEndPoint :: AMQPInternalState
                           -> EndPointAddress
                           -> IO (Either InvariantViolated RemoteEndPoint)
 createOrGetRemoteEndPoint is@AMQPInternalState{..} ourEp theirAddr = do
-  print "Inside createOrGetRemoteEndPoint"
   join $ modifyMVar (localState ourEp) $ \case
     LocalEndPointValid v@ValidLocalEndPointState{..} -> do
       opened <- readIORef _localOpened
@@ -443,7 +438,6 @@ createOrGetRemoteEndPoint is@AMQPInternalState{..} ourEp theirAddr = do
           Just rep -> do
             withMVar (remoteState rep) $ \case
               RemoteEndPointFailed -> do
-                  print $ "RemoteEndPointFailed: creating a new one"
                   create v
               _ -> return (LocalEndPointValid v, return $ Right rep)
       else return (LocalEndPointValid v, return $ Left $ IncorrectState "EndPointClosing")
@@ -453,10 +447,8 @@ createOrGetRemoteEndPoint is@AMQPInternalState{..} ourEp theirAddr = do
               )
   where
     create v = do
-      print "Inside create (new remote)"
       newChannel <- AMQP.openChannel (transportConnection istate_params)
       newExchange <- toExchangeName theirAddr
-      print $ "New exchange: " <> newExchange
       AMQP.declareExchange newChannel $ AMQP.newExchange {
           AMQP.exchangeName = newExchange
           , AMQP.exchangeType = "direct"
@@ -464,10 +456,9 @@ createOrGetRemoteEndPoint is@AMQPInternalState{..} ourEp theirAddr = do
           , AMQP.exchangeDurable = False
           , AMQP.exchangeAutoDelete = True --TODO: Be prepared to change this.
           }
-      print $ "before binding to " <> (fromAddress theirAddr)
+
       AMQP.bindQueue newChannel (fromAddress theirAddr) newExchange mempty
 
-      print $ "after binding to " <> (fromAddress theirAddr)
       state <- newMVar . RemoteEndPointPending =<< newIORef []
       opened <- newIORef False
       let rep = RemoteEndPoint theirAddr state opened
@@ -481,7 +472,6 @@ createOrGetRemoteEndPoint is@AMQPInternalState{..} ourEp theirAddr = do
       -- TODO: Shall I need to worry about AMQP Finalising my exchange?
       publish amqpChannel exg $ MessageConnect ourAddr
       let v = ValidRemoteEndPointState exg amqpChannel newCounter Set.empty 0
-      print "Inside initialize, before modifyMVar_"
       modifyMVar_ (remoteState rep) $ \case
         RemoteEndPointPending p -> do
             z <- foldM (\y f -> f y) (RemoteEndPointValid v) . Prelude.reverse =<< readIORef p
@@ -549,7 +539,6 @@ apiSend localChannel (AMQPConnection us them _ st _) m = try $ do
 --------------------------------------------------------------------------------
 apiClose :: AMQPConnection -> IO ()
 apiClose (AMQPConnection _ them _ st _) = do
-  print "Inside API Close"
   join $ modifyMVar st $ \case
     AMQPConnectionValid (ValidAMQPConnection _ idx) -> do
       return (AMQPConnectionClosed, do
