@@ -84,6 +84,10 @@ data Counter a b = Counter
   }
 
 --------------------------------------------------------------------------------
+newCounter :: Counter ConnectionId AMQPConnection
+newCounter = Counter 0 Map.empty
+
+--------------------------------------------------------------------------------
 data AMQPConnection = AMQPConnection 
   { _connectionLocalEndPoint  :: !LocalEndPoint
   , _connectionRemoteEndPoint :: !RemoteEndPoint
