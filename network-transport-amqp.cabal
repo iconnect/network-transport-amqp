@@ -8,7 +8,7 @@ maintainer:          alfredo.dinapoli@gmail.com
 category:            Network
 build-type:          Simple
 -- extra-source-files:  
-cabal-version:       >=1.18
+cabal-version:       >=1.10
 
 Source-Repository head
   Type:     git
