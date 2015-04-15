@@ -30,6 +30,8 @@ library
     , cereal >= 0.4.0.0
     , async >= 0.2.0
     , string-conv
+    , stm >= 2.4
+    , stm-chans >= 0.3
     , network-transport >= 0.4.0
     , exceptions >= 0.3
     , bytestring < 0.11

@@ -36,7 +36,7 @@ testTransportCompliance newTransport = do
     , ("CloseSelf",             testCloseSelf newTransport)
     , ("CloseEndPoint",         testCloseEndPoint transport numPings)
     , ("CloseTransport",        testCloseTransport newTransport)
--- H       ("ExceptionOnReceive",    testExceptionOnReceive newTransport)
+    , ("ExceptionOnReceive",    testExceptionOnReceive newTransport)
     , ("SendException",         testSendException newTransport)
     , ("Kill",                  testKill newTransport 30)
                                 -- testKill test have a timeconstraint so n-t-amqp

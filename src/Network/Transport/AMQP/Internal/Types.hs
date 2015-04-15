@@ -11,21 +11,20 @@ module Network.Transport.AMQP.Internal.Types
 
 import qualified Network.AMQP as AMQP
 import qualified Data.Text as T
-import Data.Map.Strict (Map)
+import           Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Set (Set)
-import Data.IORef
-import GHC.Generics (Generic)
-import Data.ByteString (ByteString)
-import Data.Serialize
-import Data.Typeable
-import Network.Transport
-import Control.Concurrent.MVar
-import Control.Exception
-import Control.Concurrent.Chan (Chan)
-
-import Lens.Family2.TH
-import Lens.Family2
+import           Data.Set (Set)
+import           Data.IORef
+import           GHC.Generics (Generic)
+import           Data.ByteString (ByteString)
+import           Data.Serialize
+import           Data.Typeable
+import           Network.Transport
+import           Control.Concurrent.MVar
+import           Control.Exception
+import           Control.Concurrent.STM.TMChan
+import           Lens.Family2.TH
+import           Lens.Family2
 
 --------------------------------------------------------------------------------
 -- Data Types
@@ -73,7 +72,7 @@ data LocalEndPointState =
 --------------------------------------------------------------------------------
 data ValidLocalEndPointState = ValidLocalEndPointState
   {
-    _localChan         :: !(Chan Event)
+    _localChan         :: !(TMChan Event)
   , _localChannel      :: !AMQP.Channel
   , _localOpened       :: !(IORef Bool)
   , _localConnections  :: !(Counter ConnectionId AMQPConnection)

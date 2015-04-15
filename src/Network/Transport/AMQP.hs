@@ -20,6 +20,8 @@ import qualified Data.Text as T
 import qualified Data.Set as Set
 import           Data.UUID.V4
 import           Data.UUID (toString, toWords)
+import           Control.Concurrent.STM
+import           Control.Concurrent.STM.TMChan
 import           Data.Bits
 import           Data.IORef
 import           Data.Monoid
@@ -36,7 +38,6 @@ import           Control.Concurrent (yield, threadDelay)
 import           Control.Concurrent.Async as Async
 import           Control.Concurrent.MVar
 import           Control.Monad
-import           Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
 import           Lens.Family2
 import           System.IO (hPutStrLn , stderr)
 import           Text.Printf
@@ -78,7 +79,11 @@ apiNewEndPoint is@AMQPInternalState{..} = try $ mapAMQPException (TransportError
       -- If a valid transport was found, create a new LocalEndPoint
       (ep@LocalEndPoint{..}, chan) <- endPointCreate (Map.size oldMap) is
       let newEp = EndPoint {
-            receive       = readChan chan
+            receive       = atomically $ do
+              mx <- readTMChan chan
+              case mx of
+                Nothing -> error "receive: channel is closed"
+                Just x  -> return x
           , address       = localAddress
           , connect       = apiConnect is ep
           , closeEndPoint = apiCloseEndPoint is ep
@@ -95,7 +100,7 @@ apiNewEndPoint is@AMQPInternalState{..} = try $ mapAMQPException (TransportError
       TransportError ResolveMulticastGroupUnsupported "Multicast not supported"
 
 -------------------------------------------------------------------------------
-endPointCreate :: Int -> AMQPInternalState -> IO (LocalEndPoint, Chan Event)
+endPointCreate :: Int -> AMQPInternalState -> IO (LocalEndPoint, TMChan Event)
 endPointCreate newId is@AMQPInternalState{..} = do
   -- Each new `EndPoint` has a new Rabbit queue. Think of it as a
   -- heavyweight connection. Subsequent connections are multiplexed
@@ -125,7 +130,7 @@ endPointCreate newId is@AMQPInternalState{..} = do
 
   AMQP.bindQueue newChannel ourEndPoint newExchange mempty
 
-  chOut <- newChan
+  chOut <- newTMChanIO
   lep <- LocalEndPoint <$> pure (toAddress ourEndPoint)
                        <*> pure (AMQPExchange newExchange)
                        <*> newEmptyMVar
@@ -173,7 +178,7 @@ toExchangeName eA = do
 --------------------------------------------------------------------------------
 startReceiver :: AMQPInternalState 
               -> LocalEndPoint
-              -> Chan Event
+              -> TMChan Event
               -> AMQP.Channel 
               -> IO ()
 startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
@@ -185,7 +190,7 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
           finaliseEndPoint lep True
       Right v@(MessageData cId rawMsg) -> do
           print v
-          writeChan _localChan $ Received cId rawMsg
+          atomically $ writeTMChan _localChan $ Received cId rawMsg
       Right v@(MessageConnect theirAddress) -> do
           print v
           void $ createOrGetRemoteEndPoint tr lep theirAddress
@@ -232,22 +237,25 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
         where
           registerRemoteEndPoint :: ConnectionId -> RemoteEndPointState -> IO RemoteEndPointState
           registerRemoteEndPoint i RemoteEndPointFailed = do
-            writeChan _localChan (ConnectionOpened i rel theirAddress)
-            writeChan _localChan (ConnectionClosed i)
+            atomically $ do
+                writeTMChan _localChan (ConnectionOpened i rel theirAddress)
+                writeTMChan _localChan (ConnectionClosed i)
             return RemoteEndPointFailed
           registerRemoteEndPoint i RemoteEndPointClosed = do
-            writeChan _localChan (ConnectionOpened i rel theirAddress)
-            writeChan _localChan (ConnectionClosed i)
+            atomically $ do
+                writeTMChan _localChan (ConnectionOpened i rel theirAddress)
+                writeTMChan _localChan (ConnectionClosed i)
             return RemoteEndPointClosed
           registerRemoteEndPoint i (RemoteEndPointClosing x) = do
-            writeChan _localChan (ConnectionOpened i rel theirAddress)
-            writeChan _localChan (ConnectionClosed i)
+            atomically $ do
+                writeTMChan _localChan (ConnectionOpened i rel theirAddress)
+                writeTMChan _localChan (ConnectionClosed i)
             return $ RemoteEndPointClosing x
           registerRemoteEndPoint _ RemoteEndPointPending{} = 
             throwM $ InvariantViolated $ RemoteEndPointCannotBePending (theirAddress)
           registerRemoteEndPoint i (RemoteEndPointValid v@(ValidRemoteEndPointState exg ch _ s _)) = do
             publish ch exg (MessageInitConnectionOk localAddress theirId i)
-            writeChan _localChan (ConnectionOpened i rel theirAddress)
+            atomically $ writeTMChan _localChan (ConnectionOpened i rel theirAddress)
             return $ RemoteEndPointValid v { _remoteIncomingConnections = Set.insert i s }
 
       --
@@ -268,7 +276,7 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
                              AMQPConnectionInit -> return  () -- throwM InvariantViolation
                              AMQPConnectionClosed -> return ()
                              AMQPConnectionValid (ValidAMQPConnection{}) -> do
-                                writeChan _localChan (ConnectionClosed idx)
+                                atomically $ writeTMChan _localChan (ConnectionClosed idx)
                                 connectionCleanup (_connectionRemoteEndPoint conn) idx)
           LocalEndPointClosed -> return (LocalEndPointClosed, return ())
 
@@ -326,7 +334,7 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
             case mst of
               Nothing -> return ()
               Just st -> onValidEndPoint lep $ \vst -> do
-                writeChan (vst ^. localChan) $
+                atomically $ writeTMChan (vst ^. localChan) $
                     ErrorEvent $ TransportError (EventConnectionLost theirAddress) "MessageEndPointClose: Exception on remote side"
                 closeRemoteEndPoint lep rep st)
 
@@ -401,7 +409,9 @@ apiCloseEndPoint tr@AMQPInternalState{..} lep@LocalEndPoint{..} =
     mbCh <- case old of
       LocalEndPointValid v@ValidLocalEndPointState{..} -> do
         -- close channel, no events will be received
-        writeChan _localChan EndPointClosed
+        atomically $ do
+          writeTMChan _localChan EndPointClosed
+          closeTMChan _localChan
         print "before publishing the PoisonPill"
         publish _localChannel localExchange PoisonPill
         return (Just _localChannel)
@@ -625,7 +635,7 @@ apiSend (AMQPConnection us them _ st _) msg = do
              print $ "Publish failed: " <> show ex
              rep <- cleanupRemoteEndPoint us them Nothing
              traverse_ (\z -> do
-                 onValidEndPoint us $ \w -> writeChan (_localChan w) $
+                 onValidEndPoint us $ \w -> atomically $ writeTMChan (_localChan w) $
                     ErrorEvent $ TransportError (EventConnectionLost (remoteAddress them)) "apiSend: Exception on remote side"
                  closeRemoteEndPoint us them z) rep
              throwIO $ TransportError SendFailed "Connection broken."
@@ -635,7 +645,7 @@ apiSend (AMQPConnection us them _ st _) msg = do
        (Just $ \v -> publish (_remoteChannel v) (_remoteExchange v) $ 
                      MessageEndPointClose (localAddress us) False)
      onValidEndPoint us $ \v -> do
-       writeChan (_localChan v) $ ErrorEvent $ TransportError
+       atomically $ writeTMChan (_localChan v) $ ErrorEvent $ TransportError
                  (EventConnectionLost (remoteAddress them)) "Exception on send."
 
 --------------------------------------------------------------------------------
@@ -733,11 +743,11 @@ remoteEndPointClose silent lep rep = do
        LocalEndPointClosed -> return ()
        LocalEndPointValid v@ValidLocalEndPointState{..} -> do
          -- notify about all connections close (?) do we really want it?
-         traverse_ (writeChan _localChan . ConnectionClosed) (Set.toList s)
+         traverse_ (atomically . writeTMChan _localChan . ConnectionClosed) (Set.toList s)
          -- if we have outgoing connections, then we have connection error
          when (i > 0) $ do
            let msg = "Remote end point closed, but " <> show i <> " outgoing connection(s)"
-           writeChan _localChan $ ErrorEvent $ TransportError (EventConnectionLost (remoteAddress rep)) msg
+           atomically $ writeTMChan _localChan $ ErrorEvent $ TransportError (EventConnectionLost (remoteAddress rep)) msg
 
      unless silent $ do
        print "go: Publishing MessageEndPointClose"
