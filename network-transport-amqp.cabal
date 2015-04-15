@@ -28,7 +28,7 @@ library
     Network.Transport.AMQP.Internal.Types
   -- other-extensions:    
   build-depends:       
-      base >=4.8 && <5.0
+      base >= 4.0 && < 5.0
     , amqp >= 0.8.3 && < 0.13
     , cereal >= 0.4.0.0
     , async >= 0.2.0
