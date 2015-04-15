@@ -59,6 +59,8 @@ data AMQPInternalState = AMQPInternalState {
 --------------------------------------------------------------------------------
 data LocalEndPoint = LocalEndPoint
   { localAddress :: !EndPointAddress
+  , localExchange :: !AMQPExchange
+  , localDone     :: !(MVar ())
   , localState   :: !(MVar LocalEndPointState)
   }
 
@@ -108,6 +110,7 @@ data AMQPConnectionState =
 --------------------------------------------------------------------------------
 data ValidAMQPConnection = ValidAMQPConnection
   { _amqpExchange :: !(Maybe AMQPExchange)
+  , _amqpChannel :: !(Maybe AMQP.Channel)
   , _amqpConnectionId :: !ConnectionId
   }
 
@@ -169,6 +172,7 @@ data AMQPMessage
   | MessageData !ConnectionId ![ByteString]
   | MessageEndPointClose   !EndPointAddress !Bool
   | MessageEndPointCloseOk !EndPointAddress
+  | PoisonPill
   deriving (Show, Generic)
 
 deriving instance Generic EndPointAddress

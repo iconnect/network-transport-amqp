@@ -24,11 +24,14 @@ main = do
 
   putStrLn $ "Chat server ready at " ++ (show . endPointAddressToByteString . address $ endpoint)
   
-  go endpoint `catch` \(_ :: SomeException) -> closeEndPoint endpoint
+  go endpoint `catch` \(e :: SomeException) -> do
+    print e
+    closeEndPoint endpoint
 
   where
    go endpoint = flip evalStateT Map.empty . forever $ do
     event <- liftIO $ receive endpoint
+    liftIO $ print $ "Received: " <> show event
     case event of
       ConnectionOpened cid _ addr -> do
         liftIO $ print $ "Connection opened with ID " <> show cid
@@ -40,3 +43,7 @@ main = do
       ConnectionClosed cid -> do
         liftIO $ print $ "Connection closed with ID " <> show cid
         modify $ Map.delete cid
+      ErrorEvent (TransportError (EventConnectionLost addr) msg) -> do
+        liftIO $ do
+          print $ "Connection lost with " <> show addr
+          print msg

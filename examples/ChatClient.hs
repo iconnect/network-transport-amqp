@@ -59,10 +59,13 @@ chatClient done endpoint serverAddr = do
   where
     getPeers :: IO [EndPointAddress]
     getPeers = do
-      ConnectionOpened{} <- receive endpoint
-      Received _ msg <- receive endpoint
-      ConnectionClosed _ <- receive endpoint
-      return . map EndPointAddress . read . BSC.unpack . BS.concat $ msg
+      msg1 <- receive endpoint
+      print $ "got " <> show msg1
+      msg2 <- receive endpoint
+      print $ "got " <> show msg2
+      msg3 <- receive endpoint
+      print $ "got " <> show msg3
+      return . map EndPointAddress . read . BSC.unpack . BS.concat $ []
 
     connectToPeers :: [EndPointAddress] -> IO (MVar (Map EndPointAddress Connection))
     connectToPeers addrs = do
