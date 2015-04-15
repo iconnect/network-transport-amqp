@@ -465,7 +465,7 @@ apiConnect is@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliabili
               RemoteEndPointFailed ->
                 return ( RemoteEndPointFailed
                        , return $ Left $ TransportError ConnectFailed "RemoteEndPoint failed.")
-    _ -> throwIO $ TransportError ConnectFailed "apiConnect: LocalEndPointClosed"
+    _ -> return $ Left $ TransportError ConnectFailed "apiConnect: LocalEndPointClosed"
   where
     waitReady conn apiConn = join $ withMVar (_connectionState conn) $ \case
       AMQPConnectionInit{}   -> return $ yield >> waitReady conn apiConn
@@ -571,7 +571,7 @@ apiSend localChannel (AMQPConnection us them _ st _) msg = do
   msgs <- try $ mapM_ evaluate msg
   case msgs of
     Left ex ->  do cleanup
-                   throwIO $ TransportError SendFailed (show (ex::SomeException))
+                   return $ Left $ TransportError SendFailed (show (ex::SomeException))
     -- TODO: Check that, in case of AMQP-raised exceptions, we are still
     -- doing the appropriate cleanup.
     Right _ -> (fmap Right send_) `catches`
@@ -579,6 +579,7 @@ apiSend localChannel (AMQPConnection us them _ st _) msg = do
                                        -- actions were performed
                      return $ Left (ex :: TransportError SendErrorCode)
                  , Handler $ \ex -> do -- AMQPError appeared exception
+                     print "Doing cleanup inside apiSend"
                      cleanup
                      -- TODO: Catching SomeException might be extreme or wrong
                      -- altogether in this context

@@ -20,24 +20,29 @@ testTransportCompliance :: IO (Either String Transport) -> IO ()
 testTransportCompliance newTransport = do
   Right transport <- newTransport
   runTests
-    [ ("PingPong",              testPingPong transport numPings)
-      , ("EndPoints",             testEndPoints transport numPings)
-      , ("Connections",           testConnections transport numPings)
-      , ("CloseOneConnection",    testCloseOneConnection transport numPings)
-      , ("CloseOneDirection",     testCloseOneDirection transport numPings)
-      , ("CloseReopen",           testCloseReopen transport numPings)
-      , ("ParallelConnects",      testParallelConnects transport (numPings * 2))
-      , ("SendAfterClose",        testSendAfterClose transport (numPings * 2))
-      , ("Crossing",              testCrossing transport numPings)
-      , ("CloseTwice",            testCloseTwice transport (numPings * 2))
-      , ("ConnectToSelf",         testConnectToSelf transport numPings)
-      , ("ConnectToSelfTwice",    testConnectToSelfTwice transport numPings)
--- F      , ("CloseSelf",             testCloseSelf newTransport)
--- F , ("CloseEndPoint",         testCloseEndPoint transport numPings)
--- F      , ("CloseTransport",        testCloseTransport newTransport)
+    [ 
+ -- P  ("PingPong",              testPingPong transport numPings)
+ -- P    , ("EndPoints",             testEndPoints transport numPings)
+ -- P    , ("Connections",           testConnections transport numPings)
+ -- P    , ("CloseOneConnection",    testCloseOneConnection transport numPings)
+ -- P    , ("CloseOneDirection",     testCloseOneDirection transport numPings)
+ -- P    , ("CloseReopen",           testCloseReopen transport numPings)
+ -- P    , ("ParallelConnects",      testParallelConnects transport (numPings * 2))
+ -- P    , ("SendAfterClose",        testSendAfterClose transport (numPings * 2))
+ -- P    , ("Crossing",              testCrossing transport numPings)
+ -- P    , ("CloseTwice",            testCloseTwice transport (numPings * 2))
+ -- P    , ("ConnectToSelf",         testConnectToSelf transport numPings)
+ -- P    , ("ConnectToSelfTwice",    testConnectToSelfTwice transport numPings)
+ -- P      ("CloseSelf",             testCloseSelf newTransport)
+ -- P     ("CloseEndPoint",         testCloseEndPoint transport numPings)
+ -- P      ("CloseTransport",        testCloseTransport newTransport)
 -- H    , ("ExceptionOnReceive",    testExceptionOnReceive newTransport)
--- F     , ("SendException",         testSendException newTransport)
-      , ("Kill",                  testKill newTransport numPings)
+      ("SendException",         testSendException newTransport)
+-- P     , ("Kill",                  testKill newTransport numPings)
     ]
+  -- The network-transport-tests testsuite doesn't close any transport,
+  -- and in the context of RabbitMQ it leads to dangling queues.
+  -- TODO: Fix the aforementioned limitation.
+  closeTransport transport
   where
     numPings = 2 :: Int
