@@ -5,6 +5,7 @@ import Network.Transport.AMQP (createTransport, AMQPParameters(..))
 import Network.AMQP (openChannel, openConnection)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar, newMVar, readMVar, modifyMVar_, modifyMVar)
 import Control.Concurrent (forkIO)
+import Control.Exception
 import Control.Monad (forever, forM, unless, when)
 import qualified Data.ByteString as BS (concat, null)
 import qualified Data.ByteString.Char8 as BSC (pack, unpack, getLine)
@@ -59,13 +60,10 @@ chatClient done endpoint serverAddr = do
   where
     getPeers :: IO [EndPointAddress]
     getPeers = do
-      msg1 <- receive endpoint
-      print $ "got " <> show msg1
-      msg2 <- receive endpoint
-      print $ "got " <> show msg2
-      msg3 <- receive endpoint
-      print $ "got " <> show msg3
-      return . map EndPointAddress . read . BSC.unpack . BS.concat $ []
+      ConnectionOpened{} <- receive endpoint
+      Received _ msg <- receive endpoint
+      ConnectionClosed _ <- receive endpoint
+      return . map EndPointAddress . read . BSC.unpack . BS.concat $ msg
 
     connectToPeers :: [EndPointAddress] -> IO (MVar (Map EndPointAddress Connection))
     connectToPeers addrs = do
@@ -84,13 +82,18 @@ chatClient done endpoint serverAddr = do
 main :: IO ()
 main = do
   server:_ <- getArgs
-  conn <- openConnection "localhost" "/" "guest" "guest"
-  let amqpTransport = AMQPParameters conn "multicast" Nothing
-  transport <- createTransport amqpTransport
-  Right endpoint <- newEndPoint transport
-  clientDone <- newEmptyMVar
+  bracket (do
+    conn <- openConnection "localhost" "/" "guest" "guest"
+    let amqpTransport = AMQPParameters conn "multicast" Nothing
+    createTransport amqpTransport
+    )  
+    closeTransport
+    (\transport -> do
+      Right endpoint <- newEndPoint transport
+      clientDone <- newEmptyMVar
 
-  forkIO $ chatClient clientDone endpoint (EndPointAddress . BSC.pack $ server)
+      forkIO $ chatClient clientDone endpoint (EndPointAddress . BSC.pack $ server)
 
-  takeMVar clientDone
-  closeEndPoint endpoint
+      takeMVar clientDone
+      closeEndPoint endpoint
+   )

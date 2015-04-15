@@ -18,6 +18,7 @@ import Data.IORef
 import GHC.Generics (Generic)
 import Data.ByteString (ByteString)
 import Data.Serialize
+import Data.Typeable
 import Network.Transport
 import Control.Concurrent.MVar
 import Control.Exception
@@ -181,10 +182,14 @@ deriving instance Generic Reliability
 instance Serialize Reliability
 instance Serialize AMQPMessage
 
-data InvariantViolated = 
-    InvariantViolated InvariantViolation
+data AMQPError
+  = InvariantViolated InvariantViolation
   | IncorrectState String
-  deriving Show
+  | ConnectionFailed
+  | DriverError AMQP.AMQPException
+  deriving (Typeable, Show)
+
+instance Exception AMQPError
 
 data InvariantViolation =
     RemoteEndPointLookupFailed EndPointAddress
@@ -193,5 +198,3 @@ data InvariantViolation =
   | RemoteEndPointMustBeValid EndPointAddress
   | LocalEndPointMustBeValid EndPointAddress
   deriving Show
-
-instance Exception InvariantViolated
