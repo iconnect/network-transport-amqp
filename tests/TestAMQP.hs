@@ -38,11 +38,11 @@ testTransportCompliance newTransport = do
      , ("CloseTransport",        testCloseTransport newTransport)
 -- H       ("ExceptionOnReceive",    testExceptionOnReceive newTransport)
 -- H   ("SendException",         testSendException newTransport)
--- F      ("Kill",                  testKill newTransport 100)
+-- H     , ("Kill",                  testKill newTransport 100)
     ]
   -- The network-transport-tests testsuite doesn't close any transport,
   -- and in the context of RabbitMQ it leads to dangling queues.
   -- TODO: Fix the aforementioned limitation.
   closeTransport transport
   where
-    numPings = 2 :: Int
+    numPings = 10 :: Int

@@ -34,6 +34,7 @@ library
     , async >= 0.2.0
     , string-conv
     , network-transport >= 0.4.0
+    , exceptions >= 0.3
     , bytestring < 0.11
     , containers >= 0.5.0.0
     , uuid >= 1.2.6

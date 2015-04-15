@@ -18,28 +18,31 @@ import Network.Transport.AMQP.Internal.Types
 import qualified Network.AMQP as AMQP
 import qualified Data.Text as T
 import qualified Data.Set as Set
-import Data.UUID.V4
-import Data.UUID (toString, toWords)
-import Data.Bits
-import Data.IORef
-import Data.Monoid
+import           Data.UUID.V4
+import           Data.UUID (toString, toWords)
+import           Data.Bits
+import           Data.IORef
+import           Data.Monoid
 import qualified Data.Map.Strict as Map
-import Data.ByteString (ByteString)
-import Data.Foldable
+import           Data.ByteString (ByteString)
+import           Data.Foldable
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as B
-import Data.String.Conv
-import Data.Serialize
-import Network.Transport
-import Network.Transport.Internal (mapIOException, asyncWhenCancelled)
-import Control.Concurrent (yield, threadDelay)
-import Control.Concurrent.Async as Async
-import Control.Concurrent.MVar
-import Control.Monad
-import Control.Exception
-import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
+import           Data.String.Conv
+import           Data.Serialize
+import           Network.Transport
+import           Network.Transport.Internal (mapIOException, asyncWhenCancelled)
+import           Control.Concurrent (yield, threadDelay)
+import           Control.Concurrent.Async as Async
+import           Control.Concurrent.MVar
+import           Control.Monad
+import           Control.Concurrent.Chan (Chan, newChan, readChan, writeChan)
+import           Lens.Family2
+import           System.IO (hPutStrLn , stderr)
+import           Text.Printf
+import           Control.Monad.Catch hiding (catches, Handler(..))
+import           Control.Exception (mapException, catches, throwIO, Handler(..), evaluate)
 
-import Lens.Family2
 
 --------------------------------------------------------------------------------
 -- Utility functions
@@ -353,9 +356,10 @@ closeRemoteEndPoint lep rep state = do
      LocalEndPointValid v -> return $
        LocalEndPointValid (over localRemotes (Map.delete (remoteAddress rep)) v)
      c -> return c
-   step2 (RemoteEndPointValid _) = do
+   step2 (RemoteEndPointValid v) = do
        print "step2: remoteEndPointValid"
-       return ()
+       -- TODO: Do I need to close the AMQP Channel here?
+       AMQP.closeChannel (v ^. remoteChannel)
    step2 (RemoteEndPointClosing (ClosingRemoteEndPoint (AMQPExchange exg) ch rd)) = do
      print "step2: remoteEndPointClosing"
      _ <- readMVar rd
@@ -378,7 +382,8 @@ connectionCleanup rep cid = modifyMVar_ (remoteState rep) $ \case
 apiCloseEndPoint :: AMQPInternalState
                  -> LocalEndPoint
                  -> IO ()
-apiCloseEndPoint tr@AMQPInternalState{..} lep@LocalEndPoint{..} = do
+apiCloseEndPoint tr@AMQPInternalState{..} lep@LocalEndPoint{..} =
+  mask_ $ either errorLog return <=< tryAMQP $ do
     print "Inside apiCloseEndPoint"
     -- we don't close endpoint here because other threads,
     -- should be able to access local endpoint state
@@ -482,9 +487,9 @@ apiConnect is@AMQPInternalState{..} lep@LocalEndPoint{..} theirAddress reliabili
 --------------------------------------------------------------------------------
 getRemoteEndPoint :: LocalEndPoint -> EndPointAddress -> IO (Maybe RemoteEndPoint)
 getRemoteEndPoint ourEp theirAddr = do
-    withMVar (localState ourEp) $ \case
-      LocalEndPointValid v -> return $ theirAddr `Map.lookup` _localRemotes v
-      LocalEndPointClosed  -> return Nothing
+  withMVar (localState ourEp) $ \case
+    LocalEndPointValid v -> return $ theirAddr `Map.lookup` _localRemotes v
+    LocalEndPointClosed  -> return Nothing
 
 --------------------------------------------------------------------------------
 createOrGetRemoteEndPoint :: AMQPInternalState
@@ -566,7 +571,8 @@ apiSend :: AMQPConnection
 apiSend (AMQPConnection us them _ st _) msg = do
   msgs <- try $ mapM_ evaluate msg
   case msgs of
-    Left ex ->  do cleanup
+    Left ex ->  do print "apiSend: receive an Exception from user"
+                   cleanup
                    return $ Left $ TransportError SendFailed (show (ex::SomeException))
     -- TODO: Check that, in case of AMQP-raised exceptions, we are still
     -- doing the appropriate cleanup.
@@ -577,9 +583,11 @@ apiSend (AMQPConnection us them _ st _) msg = do
                  , Handler $ \ex -> do -- AMQPError appeared exception
                      print "Doing cleanup inside apiSend"
                      cleanup
-                     -- TODO: Catching SomeException might be extreme or wrong
-                     -- altogether in this context
                      return $ Left $ TransportError SendFailed (show (ex::AMQPError))
+                 , Handler $ \ex -> do -- AMQPError appeared exception
+                     print "Doing cleanup inside apiSend for broker exceptions"
+                     cleanup
+                     return $ Left $ TransportError SendFailed (show (ex::AMQP.AMQPException))
                  ]
 
   where
@@ -603,7 +611,8 @@ apiSend (AMQPConnection us them _ st _) msg = do
          res <- try $ publish ch exg (MessageData idx msg)
          case res of
            Right _ -> afterP ()
-           Left (_ :: SomeException) -> do
+           Left (ex :: SomeException) -> do
+             print $ "Publish failed: " <> show ex
              rep <- cleanupRemoteEndPoint us them Nothing
              traverse_ (\z -> do
                  onValidEndPoint us $ \w -> writeChan (_localChan w) $
@@ -742,17 +751,30 @@ createTransport params@AMQPParameters{..} = do
   }
 
 --------------------------------------------------------------------------------
+-- Do not close the externally-passed AMQP connection,
+-- or it will compromise users sharing it!
 apiCloseTransport :: AMQPInternalState -> IO ()
 apiCloseTransport is = do
-  old <- readMVar $ istate_tstate is
+  old <- swapMVar (istate_tstate is) TransportClosed
   case old of
     TransportClosed -> return ()
-    -- Do not close the externally-passed AMQP connection,
-    -- or it will compromise users sharing it!
-    TransportValid (ValidTransportState _ mp) -> traverse_ (apiCloseEndPoint is) mp
-  void $ swapMVar (istate_tstate is) TransportClosed
+    TransportValid (ValidTransportState _ mp) -> either errorLog return <=< tryAMQP $ do
+      traverse_ (apiCloseEndPoint is) mp
 
 --------------------------------------------------------------------------------
 afterP :: a -> IO (IO a)
 afterP = return . return
 
+--------------------------------------------------------------------------------
+-- | Print error to standart output, this function should be used for
+-- errors that could not be handled in a normal way.
+errorLog :: Show a => a -> IO ()
+errorLog s = hPutStrLn stderr (printf "[network-transport-amqp] Unhandled error: %s" $ show s)
+
+--------------------------------------------------------------------------------
+promoteAMQPException :: a -> a
+promoteAMQPException = mapException DriverError
+
+--------------------------------------------------------------------------------
+tryAMQP :: (MonadCatch m) => m a -> m (Either AMQPError a)
+tryAMQP = try . promoteAMQPException
