@@ -20,7 +20,7 @@ testTransportCompliance :: IO (Either String Transport) -> IO ()
 testTransportCompliance newTransport = do
   Right transport <- newTransport
   runTests
-    [ 
+    [
       ("PingPong",              testPingPong transport numPings)
     , ("EndPoints",             testEndPoints transport numPings)
     , ("Connections",           testConnections transport numPings)
@@ -37,7 +37,7 @@ testTransportCompliance newTransport = do
     , ("CloseEndPoint",         testCloseEndPoint transport numPings)
     , ("CloseTransport",        testCloseTransport newTransport)
 -- H       ("ExceptionOnReceive",    testExceptionOnReceive newTransport)
--- H   ("SendException",         testSendException newTransport)
+    , ("SendException",         testSendException newTransport)
     , ("Kill",                  testKill newTransport 30)
                                 -- testKill test have a timeconstraint so n-t-amqp
                                 -- fails to work with required speed, we need to

@@ -135,14 +135,14 @@ endPointCreate newId is@AMQPInternalState{..} = do
     restore (startReceiver is lep chOut newChannel)
     AMQP.addChannelExceptionHandler newChannel $ \ex -> do
       print $ "endPointCreate, channel ex handler: " <> show ex
-      finaliseEndPoint lep
+      finaliseEndPoint lep False
     putMVar (localState lep) $ LocalEndPointValid
             (ValidLocalEndPointState chOut newChannel opened newCounter Map.empty)
     return (lep, chOut)
 
 --------------------------------------------------------------------------------
-finaliseEndPoint :: LocalEndPoint -> IO ()
-finaliseEndPoint ourEp = do
+finaliseEndPoint :: LocalEndPoint -> Bool -> IO ()
+finaliseEndPoint ourEp requestedByUser = do
   print "finaliseEndPoint"
   join $ withMVar (localState ourEp) $ \case
     LocalEndPointClosed  -> afterP ()
@@ -156,9 +156,10 @@ finaliseEndPoint ourEp = do
         Async.cancel tid
         void $ Async.waitCatch tid
   print $ "finaliseEndPoint: before swapping MVar"
-  void $ swapMVar (localState ourEp) LocalEndPointClosed
   print $ "At the end of finaliseEndPoint"
-  putMVar (localDone ourEp) ()
+  when requestedByUser $ void $ tryPutMVar (localDone ourEp) ()
+  void $ swapMVar (localState ourEp) LocalEndPointClosed
+  print $ "At the end of finaliseEndPoint (after putMVar)"
   where
     finalizer ourEp = return () -- TODO
 
@@ -181,7 +182,7 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
       Left _ -> return ()
       Right v@PoisonPill -> do
           print v
-          finaliseEndPoint lep
+          finaliseEndPoint lep True
       Right v@(MessageData cId rawMsg) -> do
           print v
           writeChan _localChan $ Received cId rawMsg
@@ -351,10 +352,20 @@ closeRemoteEndPoint lep rep state = do
   print "closeRemoteEndPoint: Step2"
   step2 state
   where
-   step1 = modifyMVar_ (localState lep) $ \case
-     LocalEndPointValid v -> return $
-       LocalEndPointValid (over localRemotes (Map.delete (remoteAddress rep)) v)
-     c -> return c
+   step1 = uninterruptibleMask_ $ do
+       -- NOTE: This step1 function is different
+       -- from Tweag's one, which used "modifyMVar_", but
+       -- on this implementation it seems to always deadlock
+       -- on the "SendException" test.
+       mbSt <- tryReadMVar (localState lep)
+       case mbSt of
+         Nothing -> return ()
+         Just vst -> do
+             newState <- case vst of
+               LocalEndPointValid v -> return $
+                 LocalEndPointValid (over localRemotes (Map.delete (remoteAddress rep)) v)
+               c -> return c
+             void $ tryPutMVar (localState lep) newState
    step2 (RemoteEndPointValid v) = do
        print "step2: remoteEndPointValid"
        -- TODO: Do I need to close the AMQP Channel here?
