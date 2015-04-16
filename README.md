@@ -9,7 +9,7 @@
 [Build Status]: http://travis-ci.org/adinapoli/network-transport-amqp
 
 [network-transport][network-transport] backend based on the
-[RabbitMQ][zeromq] distributed messaging platform. 
+[RabbitMQ][rabbitmq] distributed messaging platform. 
 
 
 [network-transport]: http://hackage.haskell.org/package/network-transport
