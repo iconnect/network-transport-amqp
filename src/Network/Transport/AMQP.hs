@@ -58,7 +58,7 @@ import           Control.Exception (mapException, catches, throwIO, Handler(..),
 #if ! MIN_VERSION_base(4,7,0)
 import           GHC.MVar
 import           GHC.Base
-import           GHC.Prim
+import           GHC.PrimopWrappers
 #endif
 
 --------------------------------------------------------------------------------
