@@ -20,6 +20,9 @@ Status
 
 - [X] Runs against [network-transport-tests]
 - [ ] Runs against [distributed-process-tests]
+      - [ ] Runs against "ch-core" (threw exception - 1 hangs, rest passes)
+      - [ ] Runs against "ch-closure" (1 fails, 1 hangs, rest passes)
+      - [X] Runs against "ch-stats"
 - [ ] Supports multicast
 
 [network-transport-tests]: http://hackage.haskell.org/package/network-transport-tests

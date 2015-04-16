@@ -14,11 +14,15 @@
 
 {--|
   A Network Transport Layer for `distributed-process`
-  based on AMQP and single-owner queues
+  based on AMQP (RabbitMQ).
 --}
 
 module Network.Transport.AMQP (
     createTransport
+  -- * Internals
+  -- $internals
+  , createTransportExposeInternals
+  , breakConnection
   , AMQPParameters(..)
   ) where
 
@@ -37,9 +41,12 @@ import           Data.IORef
 import           Data.Monoid
 import qualified Data.Map.Strict as Map
 import           Data.ByteString (ByteString)
-import           Data.Foldable hiding (mapM_)
+import qualified Data.Foldable as Foldable
+import qualified Data.Traversable as Traversable
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as B
+import qualified Data.ByteString.Char8 as B8
+import           Data.String.Conv
 import           Data.String.Conv
 import           Data.Serialize
 import           Network.Transport
@@ -324,14 +331,14 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
       --
       Right (MessageEndPointClose theirAddress True) -> do
         getRemoteEndPoint lep theirAddress >>=
-          traverse_ (\rep -> do
+          Foldable.traverse_ (\rep -> do
             onValidRemote rep $ \ValidRemoteEndPointState{..} ->
               publish _remoteChannel _remoteExchange (MessageEndPointCloseOk localAddress)
             remoteEndPointClose True lep rep)
 
       Right (MessageEndPointClose theirAddress False) -> do
         getRemoteEndPoint lep theirAddress >>=
-          traverse_ (\rep -> do
+          Foldable.traverse_ (\rep -> do
             mst <- cleanupRemoteEndPoint lep rep Nothing
             case mst of
               Nothing -> return ()
@@ -345,7 +352,7 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
       --
       Right (MessageEndPointCloseOk theirAddress) -> do
         getRemoteEndPoint lep theirAddress >>=
-          traverse_ (\rep -> do
+          Foldable.traverse_ (\rep -> do
             state <- swapMVar (remoteState rep) RemoteEndPointClosed
             closeRemoteEndPoint lep rep state)
 
@@ -600,7 +607,7 @@ apiSend (AMQPConnection us them _ st _) msg = do
            Right _ -> afterP ()
            Left (_ :: SomeException) -> do
              rep <- cleanupRemoteEndPoint us them Nothing
-             traverse_ (\z -> do
+             Foldable.traverse_ (\z -> do
                  onValidEndPoint us $ \w -> atomically $ writeTMChan (_localChan w) $
                     ErrorEvent $ TransportError (EventConnectionLost (remoteAddress them)) "apiSend: Exception on remote side"
                  closeRemoteEndPoint us them z) rep
@@ -652,7 +659,7 @@ cleanupRemoteEndPoint lep rep actions = do
       case oldState of
         RemoteEndPointValid w -> do
           let cn = w ^. (remotePendingConnections . cntValue)
-          traverse_ (\c -> void $ swapMVar (_connectionState c) AMQPConnectionFailed) cn
+          Foldable.traverse_ (\c -> void $ swapMVar (_connectionState c) AMQPConnectionFailed) cn
           cn' <- foldM
                (\c' idx -> case idx `Map.lookup` cn of
                    Nothing -> return c'
@@ -697,7 +704,7 @@ remoteEndPointClose silent lep rep = do
        LocalEndPointClosed -> return ()
        LocalEndPointValid ValidLocalEndPointState{..} -> do
          -- notify about all connections close (?) do we really want it?
-         traverse_ (atomically . writeTMChan _localChan . ConnectionClosed) (Set.toList s)
+         Foldable.traverse_ (atomically . writeTMChan _localChan . ConnectionClosed) (Set.toList s)
          -- if we have outgoing connections, then we have connection error
          when (i > 0) $ do
            let msg = "Remote end point closed, but " <> show i <> " outgoing connection(s)"
@@ -714,14 +721,18 @@ remoteEndPointClose silent lep rep = do
 
 --------------------------------------------------------------------------------
 createTransport :: AMQPParameters -> IO Transport
-createTransport params@AMQPParameters{..} = do
+createTransport params = (fmap snd) (createTransportExposeInternals params)
+
+--------------------------------------------------------------------------------
+createTransportExposeInternals :: AMQPParameters -> IO (AMQPInternalState, Transport)
+createTransportExposeInternals params@AMQPParameters{..} = do
   let validTState = ValidTransportState transportConnection Map.empty
   tState <- newMVar (TransportValid validTState)
   let iState = AMQPInternalState params tState
-  return Transport {
-    newEndPoint = apiNewEndPoint iState
-  , closeTransport = apiCloseTransport iState
-  }
+  return (iState, Transport {
+            newEndPoint = apiNewEndPoint iState
+          , closeTransport = apiCloseTransport iState
+          })
 
 --------------------------------------------------------------------------------
 -- Do not close the externally-passed AMQP connection,
@@ -732,7 +743,7 @@ apiCloseTransport is = do
   case old of
     TransportClosed -> return ()
     TransportValid (ValidTransportState _ mp) -> either errorLog return <=< tryAMQP $ do
-      traverse_ (apiCloseEndPoint is) mp
+      Foldable.traverse_ (apiCloseEndPoint is) mp
 
 --------------------------------------------------------------------------------
 afterP :: a -> IO (IO a)
@@ -755,6 +766,31 @@ tryAMQP = try . promoteAMQPException
 --------------------------------------------------------------------------------
 mapAMQPException :: (Exception e) => (AMQPError -> e) -> a -> a
 mapAMQPException = mapException
+
+--------------------------------------------------------------------------------
+-- | Break endpoint connection, all endpoints that will be affected.
+breakConnection :: AMQPInternalState
+                -> EndPointAddress
+                -> EndPointAddress
+                -> IO ()
+breakConnection AMQPInternalState{..} _ tgt = 
+  Foldable.sequence_ <=<  withMVar istate_tstate $ \case
+    TransportValid v -> Traversable.forM (_tstateEndPoints v) $ \x ->
+      withMVar (localState x) $ \case
+        LocalEndPointValid w -> return $ Foldable.sequence_ $ flip Map.mapWithKey (w ^. localRemotes) $ \key rep ->
+          if onDeadHost key
+          then do
+            mz <- cleanupRemoteEndPoint x rep Nothing
+            flip Foldable.traverse_ mz $ \z -> do
+              atomically $ writeTMChan (_localChan w) $
+                ErrorEvent $ TransportError (EventConnectionLost key) "Manual connection break"
+              closeRemoteEndPoint x rep z
+          else return ()
+        LocalEndPointClosed -> afterP ()
+    TransportClosed -> return Map.empty
+  where
+    dh = B8.init . fst $ B8.spanEnd (/=':') (endPointAddressToByteString tgt)
+    onDeadHost = B8.isPrefixOf dh . endPointAddressToByteString
 
 #if ! MIN_VERSION_base(4,7,0)
 --------------------------------------------------------------------------------
