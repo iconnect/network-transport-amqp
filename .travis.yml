@@ -4,6 +4,10 @@
 notifications:
   email: false
 
+before_script: "travis_install_deps.sh"
+services:
+  - rabbitmq
+
 env:
  - GHCVER=7.6.3 CABALVER=1.16
  - GHCVER=7.8.4 CABALVER=1.18
@@ -23,13 +27,12 @@ before_install:
 
 install:
  - cabal update
- - cabal install --only-dependencies --enable-tests
+ - cabal install --only-dependencies -v2 --enable-tests
 
 script:
  - cabal configure
  - cabal build
-   # Skip tests, as RabbitMQ is not installed anyway.
-   #  - cabal test --show-details=always
+ - cabal test --show-details=always
  - cabal check
  - cabal sdist
 
