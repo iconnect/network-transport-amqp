@@ -58,6 +58,11 @@ import           Control.Exception (mapException, catches, throwIO, Handler(..),
 #if ! MIN_VERSION_base(4,7,0)
 import           GHC.MVar
 import           GHC.Base
+import           GHC.Prim
+#endif
+
+#if ! MIN_VERSION_base(4,6,0)
+import           GHC.Prim
 #endif
 
 --------------------------------------------------------------------------------
@@ -372,7 +377,7 @@ closeRemoteEndPoint lep rep state = do
                  LocalEndPointValid (over localRemotes (Map.delete (remoteAddress rep)) v)
                c -> return c
              void $ tryPutMVar (localState lep) newState
-   step2 (RemoteEndPointClosing (ClosingRemoteEndPoint (AMQPExchange exg) ch rd)) = do
+   step2 (RemoteEndPointClosing (ClosingRemoteEndPoint (AMQPExchange _) _ rd)) = do
      _ <- readMVar rd
      return () -- No AMQP cleanup needed (cfr. TTL)
    step2 _ = return ()
@@ -390,7 +395,7 @@ connectionCleanup rep cid = modifyMVar_ (remoteState rep) $ \case
 apiCloseEndPoint :: AMQPInternalState
                  -> LocalEndPoint
                  -> IO ()
-apiCloseEndPoint AMQPInternalState{..} lep@LocalEndPoint{..} =
+apiCloseEndPoint AMQPInternalState{..} LocalEndPoint{..} =
   mask_ $ either errorLog return <=< tryAMQP $ do
     -- we don't close endpoint here because other threads,
     -- should be able to access local endpoint state

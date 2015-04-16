@@ -30,7 +30,7 @@ install:
  - cabal install --only-dependencies -v2 --enable-tests
 
 script:
- - cabal configure
+ - cabal configure --enable-tests -v2
  - cabal build
  - cabal test --show-details=always
  - cabal check
