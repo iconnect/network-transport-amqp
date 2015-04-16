@@ -25,6 +25,7 @@ module Network.Transport.AMQP (
 import Network.Transport.AMQP.Internal.Types
 
 import qualified Network.AMQP as AMQP
+import qualified Network.AMQP.Types as AMQP
 import qualified Data.Text as T
 import qualified Data.Set as Set
 import           Data.UUID.V4
@@ -131,6 +132,7 @@ endPointCreate newId is@AMQPInternalState{..} = do
       , AMQP.queuePassive = False
       , AMQP.queueDurable = False
       , AMQP.queueExclusive = False
+      , AMQP.queueHeaders = queueHeaders
       }
 
   newExchange <- toExchangeName (toAddress ourEndPoint)
@@ -157,6 +159,8 @@ endPointCreate newId is@AMQPInternalState{..} = do
     putMVar (localState lep) $ LocalEndPointValid
             (ValidLocalEndPointState chOut newChannel opened newCounter Map.empty)
     return (lep, chOut)
+  where
+    queueHeaders = AMQP.FieldTable (Map.fromList [("x-expires", AMQP.FVInt32 1000)])
 
 --------------------------------------------------------------------------------
 finaliseEndPoint :: LocalEndPoint -> Bool -> IO ()
@@ -610,7 +614,7 @@ apiSend (AMQPConnection us them _ st _) msg = do
          res <- try $ publish ch exg (MessageData idx msg)
          case res of
            Right _ -> afterP ()
-           Left (ex :: SomeException) -> do
+           Left (_ :: SomeException) -> do
              rep <- cleanupRemoteEndPoint us them Nothing
              traverse_ (\z -> do
                  onValidEndPoint us $ \w -> atomically $ writeTMChan (_localChan w) $

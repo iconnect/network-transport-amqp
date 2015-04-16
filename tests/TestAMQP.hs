@@ -13,7 +13,7 @@ main :: IO ()
 main = do
   conn <- openConnection "localhost" "/" "guest" "guest"
   let amqpParameters = AMQPParameters conn "simple-multicast" Nothing
-  testTransportCompliance (Right <$> (createTransport amqpParameters))
+  testTransportCompliance (Right <$> createTransport amqpParameters)
 
 -- | These tests that our transport layer it's compliant to the 
 -- official specification.
@@ -44,9 +44,5 @@ testTransportCompliance newTransport = do
                                 -- fails to work with required speed, we need to
                                 -- reduce a number of tests here. (Same limitation as n-t-0MQ)
     ]
-  -- The network-transport-tests testsuite doesn't close any transport,
-  -- and in the context of RabbitMQ it leads to dangling queues.
-  -- TODO: Fix the aforementioned limitation.
-  closeTransport transport
   where
     numPings = 10 :: Int
