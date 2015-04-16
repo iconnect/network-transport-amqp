@@ -124,9 +124,10 @@ endPointCreate newId is@AMQPInternalState{..} = do
   let qName = maybe uuid toS (transportEndpoint istate_params)
   newChannel <- AMQP.openChannel (transportConnection istate_params)
 
-  -- TODO: In case we do not randomise the endpoint name, there is the
-  -- risk that creating 2 endpoints for a Transport with fixed address
-  -- will cause the former to share the same queue.
+  -- https://www.rabbitmq.com/ttl.html
+  -- Using a TTL for a heavyweight connection we ensure we will do
+  -- the appropriate cleanup even if we do not shutdown correctly an
+  -- endpoint or the transport layer.
   (ourEndPoint,_,_) <- AMQP.declareQueue newChannel $ AMQP.newQueue {
       AMQP.queueName = qName <> ":" <> T.pack (show newId)
       , AMQP.queuePassive = False
@@ -160,7 +161,7 @@ endPointCreate newId is@AMQPInternalState{..} = do
             (ValidLocalEndPointState chOut newChannel opened newCounter Map.empty)
     return (lep, chOut)
   where
-    queueHeaders = AMQP.FieldTable (Map.fromList [("x-expires", AMQP.FVInt32 1000)])
+    queueHeaders = AMQP.FieldTable (Map.fromList [("x-expires", AMQP.FVInt32 3000)])
 
 --------------------------------------------------------------------------------
 finaliseEndPoint :: LocalEndPoint -> Bool -> IO ()
@@ -371,12 +372,9 @@ closeRemoteEndPoint lep rep state = do
                  LocalEndPointValid (over localRemotes (Map.delete (remoteAddress rep)) v)
                c -> return c
              void $ tryPutMVar (localState lep) newState
-   step2 (RemoteEndPointValid v) = do
-       AMQP.closeChannel (v ^. remoteChannel)
    step2 (RemoteEndPointClosing (ClosingRemoteEndPoint (AMQPExchange exg) ch rd)) = do
      _ <- readMVar rd
-     AMQP.deleteExchange ch exg
-     AMQP.closeChannel ch
+     return () -- No AMQP cleanup needed (cfr. TTL)
    step2 _ = return ()
 
 
@@ -397,15 +395,14 @@ apiCloseEndPoint AMQPInternalState{..} lep@LocalEndPoint{..} =
     -- we don't close endpoint here because other threads,
     -- should be able to access local endpoint state
     old <- readMVar localState
-    mbCh <- case old of
+    case old of
       LocalEndPointValid ValidLocalEndPointState{..} -> do
         -- close channel, no events will be received
         atomically $ do
           writeTMChan _localChan EndPointClosed
           closeTMChan _localChan
         publish _localChannel localExchange PoisonPill
-        return (Just _localChannel)
-      LocalEndPointClosed -> return Nothing
+      LocalEndPointClosed -> return ()
 
     takeMVar localDone
     void $ swapMVar localState LocalEndPointClosed
@@ -413,21 +410,7 @@ apiCloseEndPoint AMQPInternalState{..} lep@LocalEndPoint{..} =
       TransportClosed  -> return TransportClosed
       TransportValid v -> return
         $ TransportValid (over tstateEndPoints (Map.delete localAddress) v)
-    -- Try to cleanup queue and channel
-    case mbCh of
-      Just ch -> finaliseQueueAndChannel lep ch
-      Nothing -> do
-          tmpCh <- AMQP.openChannel (transportConnection istate_params)
-          finaliseQueueAndChannel lep tmpCh
 
---------------------------------------------------------------------------------
-finaliseQueueAndChannel :: LocalEndPoint -> AMQP.Channel -> IO ()
-finaliseQueueAndChannel LocalEndPoint{..} ch = do
-  let queue = fromAddress localAddress
-  let (AMQPExchange e) = localExchange
-  AMQP.deleteExchange ch e
-  _ <- AMQP.deleteQueue ch queue
-  AMQP.closeChannel ch
 
 --------------------------------------------------------------------------------
 toAddress :: T.Text -> EndPointAddress
