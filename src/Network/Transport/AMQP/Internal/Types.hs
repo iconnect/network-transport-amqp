@@ -5,6 +5,7 @@
 {-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE RankNTypes #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 
 module Network.Transport.AMQP.Internal.Types
   (module Network.Transport.AMQP.Internal.Types) where

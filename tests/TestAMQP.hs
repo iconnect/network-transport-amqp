@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -fno-warn-unused-imports #-} -- Cut noise for post-AMP imports
 module Main where
 
 import Control.Applicative

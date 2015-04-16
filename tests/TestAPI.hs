@@ -1,10 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Main where
 
-import Control.Concurrent
 import Control.Monad ( replicateM )
-
-import Data.IORef
 
 import Network.Transport
 import Network.Transport.AMQP
