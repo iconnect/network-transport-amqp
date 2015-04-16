@@ -1,10 +1,11 @@
 {-# LANGUAGE OverloadedStrings #-}
 import System.Environment (getArgs)
 import Network.Transport
-import Network.Transport.AMQP (createTransport, AMQPTransport(..))
+import Network.Transport.AMQP (createTransport, AMQPParameters(..))
 import Network.AMQP (openChannel, openConnection)
 import Control.Concurrent.MVar (MVar, newEmptyMVar, takeMVar, putMVar, newMVar, readMVar, modifyMVar_, modifyMVar)
 import Control.Concurrent (forkIO)
+import Control.Exception
 import Control.Monad (forever, forM, unless, when)
 import qualified Data.ByteString as BS (concat, null)
 import qualified Data.ByteString.Char8 as BSC (pack, unpack, getLine)
@@ -15,6 +16,7 @@ import qualified Data.Map as Map (fromList, elems, insert, member, empty, size, 
 chatClient :: MVar () -> EndPoint -> EndPointAddress -> IO ()
 chatClient done endpoint serverAddr = do
     connect endpoint serverAddr ReliableOrdered defaultConnectHints
+    print "Connected to server"
     cOut <- getPeers >>= connectToPeers
     cIn  <- newMVar Map.empty
 
@@ -25,6 +27,7 @@ chatClient done endpoint serverAddr = do
         Received _ msg ->
           putStrLn . BSC.unpack . BS.concat $ msg
         ConnectionOpened cid _ addr -> do
+          print "chat client loop - ConnectionOpened"
           modifyMVar_ cIn $ return . Map.insert cid addr
           didAdd <- modifyMVar cOut $ \conns ->
             if not (Map.member addr conns)
@@ -35,6 +38,7 @@ chatClient done endpoint serverAddr = do
                 return (conns, False)
           when didAdd $ showNumPeers cOut
         ConnectionClosed cid -> do
+          print "chat client loop - ConnectionClosed"
           addr <- modifyMVar cIn $ \conns ->
             return (Map.delete cid conns, conns Map.! cid)
           modifyMVar_ cOut $ \conns -> do
@@ -42,29 +46,6 @@ chatClient done endpoint serverAddr = do
             return (Map.delete addr conns)
           showNumPeers cOut
 
-
-
-{-
-    chatState <- newMVar (Map.fromList peerConns)
-
-    -- Thread to listen to incoming messages
-    forkIO . forever $ do
-      event <- receive endpoint
-      case event of
-        ConnectionOpened _ _ (EndPointAddress addr) -> do
-          modifyMVar_ chatState $ \peers ->
-            if not (Map.member addr peers)
-              then do
-                Right conn <- connect endpoint (EndPointAddress addr) ReliableOrdered
-                return (Map.insert addr conn peers)
-              else
-                return peers
-        Received _ msg ->
-          putStrLn . BSC.unpack . BS.concat $ msg
-        ConnectionClosed _ ->
-          return ()
-
--}
     -- Thread to interact with the user
     showNumPeers cOut
     let go = do
@@ -101,13 +82,18 @@ chatClient done endpoint serverAddr = do
 main :: IO ()
 main = do
   server:_ <- getArgs
-  conn <- openConnection "localhost" "/" "guest" "guest"
-  ch <- openChannel conn
-  let amqpTransport = AMQPTransport conn ch Nothing
-  let transport = createTransport amqpTransport
-  Right endpoint <- newEndPoint transport
-  clientDone <- newEmptyMVar
+  bracket (do
+    conn <- openConnection "localhost" "/" "guest" "guest"
+    let amqpTransport = AMQPParameters conn "multicast" Nothing
+    createTransport amqpTransport
+    )  
+    closeTransport
+    (\transport -> do
+      Right endpoint <- newEndPoint transport
+      clientDone <- newEmptyMVar
 
-  forkIO $ chatClient clientDone endpoint (EndPointAddress . BSC.pack $ server)
+      forkIO $ chatClient clientDone endpoint (EndPointAddress . BSC.pack $ server)
 
-  takeMVar clientDone
+      takeMVar clientDone
+      closeEndPoint endpoint
+   )

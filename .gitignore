@@ -7,3 +7,6 @@ examples/chat-client
 **/**/**.DS_Store
 dist
 .hub
+.DS_Store
+tests/.DS_Store
+tags
