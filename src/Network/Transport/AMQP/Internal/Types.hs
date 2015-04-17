@@ -92,7 +92,12 @@ data ConsumerStatus = ConsumerStatus
 
 --------------------------------------------------------------------------------
 data ConsumerState = ConsumerOK
-                   | ConsumerNeedsToDie
+                   | ConsumerNeedsToDie RequestedBy
+
+--------------------------------------------------------------------------------
+data RequestedBy = RequestedByUser
+                 | RequestedBySystem
+                 deriving (Show, Eq)
 
 --------------------------------------------------------------------------------
 data Counter a b = Counter 

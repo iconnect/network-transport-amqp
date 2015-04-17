@@ -177,7 +177,7 @@ endPointCreate newId is@AMQPInternalState{..} = do
         st <- readIORef cState
         case st of
           ConsumerOK -> errorLog "Impossible! Consumer ok despite request to die received."
-          ConsumerNeedsToDie -> finaliseEndPoint cTag lep
+          ConsumerNeedsToDie requestedBy -> finaliseEndPoint cTag lep requestedBy
     putMVar (localState lep) $ LocalEndPointValid
             (ValidLocalEndPointState chOut newChannel opened thread newCounter Map.empty)
     return (lep, chOut)
@@ -185,8 +185,9 @@ endPointCreate newId is@AMQPInternalState{..} = do
     queueHeaders = AMQP.FieldTable (Map.fromList [("x-expires", AMQP.FVInt32 3000)])
 
 --------------------------------------------------------------------------------
-finaliseEndPoint :: AMQP.ConsumerTag -> LocalEndPoint -> IO ()
-finaliseEndPoint cTag ourEp = do
+finaliseEndPoint :: AMQP.ConsumerTag -> LocalEndPoint -> RequestedBy -> IO ()
+finaliseEndPoint cTag ourEp reqBy = do
+  print $ "finaliseEndPoint:" <> show reqBy
   join $ withMVar (localState ourEp) $ \case
     LocalEndPointClosed  -> afterP ()
     LocalEndPointValid v@ValidLocalEndPointState{..} -> do
@@ -196,7 +197,7 @@ finaliseEndPoint cTag ourEp = do
              $ v ^. localRemotes
         AMQP.cancelConsumer _localChannel cTag
   void $ swapMVar (localState ourEp) LocalEndPointClosed
-  void $ tryPutMVar (localDone ourEp) ()
+  when (reqBy == RequestedByUser) $ void $ tryPutMVar (localDone ourEp) ()
 
 --------------------------------------------------------------------------------
 toExchangeName :: EndPointAddress -> IO T.Text
@@ -216,7 +217,7 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
 
     let consumeAction = case cSt of
           ConsumerOK -> consume
-          ConsumerNeedsToDie -> \m -> mask_ $ case decode' m of
+          ConsumerNeedsToDie _ -> \m -> mask_ $ case decode' m of
             Right (MessageEndPointCloseOk theirAddress) -> 
               getRemoteEndPoint lep theirAddress >>=
                 Foldable.traverse_ (\rep -> do
@@ -230,7 +231,7 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
         print ex
         errorLog ex
         uninterruptibleMask_ $ do
-          writeIORef ref ConsumerNeedsToDie
+          writeIORef ref (ConsumerNeedsToDie RequestedBySystem) 
           void $ tryPutMVar (_cmrLock localConsumerStatus) ()
       Right () -> return ()
   where 
@@ -443,7 +444,7 @@ apiCloseEndPoint AMQPInternalState{..} LocalEndPoint{..} =
         atomically $ do
           writeTMChan _localChan EndPointClosed
           closeTMChan _localChan
-        writeIORef (_cmrState localConsumerStatus) ConsumerNeedsToDie
+        writeIORef (_cmrState localConsumerStatus) (ConsumerNeedsToDie RequestedByUser) 
         void $ tryPutMVar (_cmrLock localConsumerStatus) ()
       LocalEndPointClosed -> return ()
 
