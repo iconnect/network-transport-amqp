@@ -14,9 +14,9 @@ main :: IO ()
 main = defaultMain $
   testGroup "API tests"
       [ testCase "simple" test_simple
-      , testCase "connection break" test_connectionBreak
-      , testCase "test multicast" test_multicast
-      , testCase "connect to non existent host" test_nonexists
+      -- , testCase "connection break" test_connectionBreak
+      -- , testCase "test multicast" test_multicast
+      -- , testCase "connect to non existent host" test_nonexists
       ]
 
 newTransport :: IO Transport
