@@ -22,6 +22,7 @@ import           Data.Serialize
 import           Data.Typeable
 import           Network.Transport
 import           Control.Concurrent.MVar
+import           Control.Concurrent.Async
 import           Control.Exception
 import           Control.Concurrent.STM.TMChan
 import           Lens.Family2.TH
@@ -49,6 +50,7 @@ data TransportState
 data ValidTransportState = ValidTransportState {
     _tstateConnection :: AMQP.Connection
   , _tstateEndPoints :: !(Map EndPointAddress LocalEndPoint)
+  , _tstateNextEndPointId :: !Int
   }
 
 --------------------------------------------------------------------------------
@@ -59,10 +61,11 @@ data AMQPInternalState = AMQPInternalState {
 
 --------------------------------------------------------------------------------
 data LocalEndPoint = LocalEndPoint
-  { localAddress :: !EndPointAddress
-  , localExchange :: !AMQPExchange
-  , localDone     :: !(MVar ())
-  , localState   :: !(MVar LocalEndPointState)
+  { localAddress        :: !EndPointAddress
+  , localExchange       :: !AMQPExchange
+  , localDone           :: !(MVar ())
+  , localConsumerStatus :: !ConsumerStatus
+  , localState          :: !(MVar LocalEndPointState)
   }
 
 --------------------------------------------------------------------------------
@@ -76,9 +79,20 @@ data ValidLocalEndPointState = ValidLocalEndPointState
     _localChan         :: !(TMChan Event)
   , _localChannel      :: !AMQP.Channel
   , _localOpened       :: !(IORef Bool)
+  , _localThread       :: !(Async ())
   , _localConnections  :: !(Counter ConnectionId AMQPConnection)
   , _localRemotes      :: !(Map EndPointAddress RemoteEndPoint)
   }
+
+--------------------------------------------------------------------------------
+data ConsumerStatus = ConsumerStatus
+  { _cmrState :: !(IORef ConsumerState)
+  , _cmrLock  :: !(MVar ())
+  }
+
+--------------------------------------------------------------------------------
+data ConsumerState = ConsumerOK
+                   | ConsumerNeedsToDie
 
 --------------------------------------------------------------------------------
 data Counter a b = Counter 
@@ -173,7 +187,6 @@ data AMQPMessage
   | MessageData !ConnectionId ![ByteString]
   | MessageEndPointClose   !EndPointAddress !Bool
   | MessageEndPointCloseOk !EndPointAddress
-  | PoisonPill
   deriving (Show, Generic)
 
 deriving instance Generic EndPointAddress
