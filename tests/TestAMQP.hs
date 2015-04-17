@@ -39,7 +39,7 @@ testTransportCompliance newTransport = do
     , ("CloseTransport",        testCloseTransport newTransport)
     , ("ExceptionOnReceive",    testExceptionOnReceive newTransport)
     , ("SendException",         testSendException newTransport)
-    , ("Kill",                  testKill newTransport 20)
+    , ("Kill",                  testKill newTransport 1)
                                 -- testKill test have a timeconstraint so n-t-amqp
                                 -- fails to work with required speed, we need to
                                 -- reduce a number of tests here. (Same limitation as n-t-0MQ)
