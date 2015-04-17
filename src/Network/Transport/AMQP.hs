@@ -144,6 +144,8 @@ endPointCreate newId is@AMQPInternalState{..} = do
       , AMQP.queueHeaders = queueHeaders
       }
 
+  AMQP.qos newChannel 0 1 False
+
   newExchange <- toExchangeName (toAddress ourEndPoint)
   AMQP.declareExchange newChannel $ AMQP.newExchange {
       AMQP.exchangeName = newExchange
@@ -524,6 +526,7 @@ createOrGetRemoteEndPoint AMQPInternalState{..} ourEp theirAddr = do
           , AMQP.exchangeAutoDelete = True
           }
 
+      AMQP.qos newChannel 0 1 False
       AMQP.bindQueue newChannel (fromAddress theirAddr) newExchange mempty
 
       state <- newMVar . RemoteEndPointPending =<< newIORef []

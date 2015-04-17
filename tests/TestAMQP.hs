@@ -28,10 +28,10 @@ testTransportCompliance newTransport = do
     , ("CloseOneConnection",    testCloseOneConnection transport numPings)
     , ("CloseOneDirection",     testCloseOneDirection transport numPings)
     , ("CloseReopen",           testCloseReopen transport numPings)
-    , ("ParallelConnects",      testParallelConnects transport (numPings * 2))
-    , ("SendAfterClose",        testSendAfterClose transport (numPings * 2))
+    , ("ParallelConnects",      testParallelConnects transport numPings)
+    , ("SendAfterClose",        testSendAfterClose transport numPings)
     , ("Crossing",              testCrossing transport numPings)
-    , ("CloseTwice",            testCloseTwice transport (numPings * 2))
+    , ("CloseTwice",            testCloseTwice transport numPings)
     , ("ConnectToSelf",         testConnectToSelf transport numPings)
     , ("ConnectToSelfTwice",    testConnectToSelfTwice transport numPings)
     , ("CloseSelf",             testCloseSelf newTransport)
@@ -45,4 +45,4 @@ testTransportCompliance newTransport = do
                                 -- reduce a number of tests here. (Same limitation as n-t-0MQ)
     ]
   where
-    numPings = 200 :: Int
+    numPings = 500 :: Int
