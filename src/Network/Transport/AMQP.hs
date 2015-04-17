@@ -600,7 +600,6 @@ publish chn (AMQPExchange e) msg = do
                                  })
 
 --------------------------------------------------------------------------------
--- TODO: Deal with exceptions and error at the broker level.
 apiSend :: AMQPConnection
         -> [ByteString] 
         -> IO (Either (TransportError SendErrorCode) ())
@@ -609,8 +608,6 @@ apiSend (AMQPConnection us them _ st _) msg = do
   case msgs of
     Left ex ->  do cleanup
                    return $ Left $ TransportError SendFailed (show (ex::SomeException))
-    -- TODO: Check that, in case of AMQP-raised exceptions, we are still
-    -- doing the appropriate cleanup.
     Right _ -> (fmap Right send_) `catches`
                  [ Handler $ \ex ->    -- TransportError - return, as all require
                                        -- actions were performed
