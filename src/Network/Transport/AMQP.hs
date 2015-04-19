@@ -825,7 +825,7 @@ breakConnection AMQPInternalState{..} _ tgt =
         LocalEndPointClosed -> afterP ()
     TransportClosed -> return Map.empty
   where
-    dh = B8.init . fst $ B8.spanEnd (/=':') (endPointAddressToByteString tgt)
+    dh = B8.init . fst $ B8.break (==':') (endPointAddressToByteString tgt)
     onDeadHost = B8.isPrefixOf dh . endPointAddressToByteString
 
 #if ! MIN_VERSION_base(4,7,0)

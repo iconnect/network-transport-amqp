@@ -100,7 +100,7 @@ Test-Suite test-ch-core
 
 Test-Suite test-ch-closure
   Type:               exitcode-stdio-1.0
-  Main-Is:            TestCh.hs
+  Main-Is:            TestCH.hs
   CPP-Options:        -DTEST_SUITE_MODULE=Control.Distributed.Process.Tests.Closure
   default-extensions: CPP
   ghc-options:        -Wall -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind -caf-all -auto-all
