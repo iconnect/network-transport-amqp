@@ -173,7 +173,6 @@ endPointCreate newId is@AMQPInternalState{..} = do
     cTag <- restore (startReceiver is lep chOut newChannel)
     thread <- Async.async $ do
         _ <- takeMVar cStateLock
-        print "wakeUp"
         st <- readIORef cState
         case st of
           ConsumerOK -> errorLog "Impossible! Consumer ok despite request to die received."
@@ -187,7 +186,6 @@ endPointCreate newId is@AMQPInternalState{..} = do
 --------------------------------------------------------------------------------
 finaliseEndPoint :: AMQP.ConsumerTag -> LocalEndPoint -> RequestedBy -> IO ()
 finaliseEndPoint cTag ourEp reqBy = do
-  print $ "finaliseEndPoint:" <> show reqBy
   join $ withMVar (localState ourEp) $ \case
     LocalEndPointClosed  -> afterP ()
     LocalEndPointValid v@ValidLocalEndPointState{..} -> do
@@ -230,7 +228,7 @@ startReceiver tr@AMQPInternalState{..} lep@LocalEndPoint{..} _localChan ch = do
       Left (ex :: SomeException) -> do
         print ex
         errorLog ex
-        uninterruptibleMask_ $ do
+        mask_ $ do
           writeIORef ref (ConsumerNeedsToDie RequestedBySystem) 
           void $ tryPutMVar (_cmrLock localConsumerStatus) ()
       Right () -> return ()
@@ -415,9 +413,14 @@ closeRemoteEndPoint lep rep state = do
                  LocalEndPointValid (over localRemotes (Map.delete (remoteAddress rep)) v)
                c -> return c
              void $ tryPutMVar (localState lep) newState
-   step2 (RemoteEndPointClosing (ClosingRemoteEndPoint (AMQPExchange _) _ rd)) = do
+   step2 (RemoteEndPointClosing (ClosingRemoteEndPoint (AMQPExchange ex) ch rd)) = do
      _ <- readMVar rd
-     return () -- No AMQP cleanup needed (cfr. TTL)
+     AMQP.deleteExchange ch ex
+     AMQP.closeChannel ch
+   step2 (RemoteEndPointValid v) = do
+     let (AMQPExchange ex) = _remoteExchange v
+     AMQP.deleteExchange (_remoteChannel v) ex
+     AMQP.closeChannel (_remoteChannel v)
    step2 _ = return ()
 
 
@@ -448,9 +451,7 @@ apiCloseEndPoint AMQPInternalState{..} LocalEndPoint{..} =
         void $ tryPutMVar (_cmrLock localConsumerStatus) ()
       LocalEndPointClosed -> return ()
 
-    print "Waiting for localDone"
     takeMVar localDone
-    print "After localDone"
     void $ swapMVar localState LocalEndPointClosed
     modifyMVar_ istate_tstate $ \case
       TransportClosed  -> return TransportClosed
@@ -660,7 +661,7 @@ apiSend (AMQPConnection us them _ st _) msg = do
 --------------------------------------------------------------------------------
 apiClose :: AMQPConnection -> IO ()
 apiClose (AMQPConnection _ them _ st _) = 
-  either errorLog return <=< tryAMQP $ uninterruptibleMask_ $ do
+  either errorLog return <=< tryAMQP $ mask_ $ do
     join $ modifyMVar st $ \case
       AMQPConnectionValid (ValidAMQPConnection _ _ idx) -> do
         return (AMQPConnectionClosed, do
@@ -809,13 +810,16 @@ breakConnection :: AMQPInternalState
                 -> EndPointAddress
                 -> EndPointAddress
                 -> IO ()
-breakConnection AMQPInternalState{..} _ tgt = 
+breakConnection AMQPInternalState{..} src tgt = 
   Foldable.sequence_ <=<  withMVar istate_tstate $ \case
     TransportValid v -> Traversable.forM (_tstateEndPoints v) $ \x ->
       withMVar (localState x) $ \case
-        LocalEndPointValid w -> return $ Foldable.sequence_ $ flip Map.mapWithKey (w ^. localRemotes) $ \key rep ->
+        LocalEndPointValid w -> return $ Foldable.sequence_ $ flip Map.mapWithKey (w ^. localRemotes) $ \key rep -> do
           if onDeadHost key
           then do
+            onValidRemote rep $ \v -> do
+              publish (_remoteChannel v) (_remoteExchange v) (MessageEndPointClose src False)
+              -- void $ AMQP.deleteQueue (_remoteChannel v) (fromAddress tgt)
             mz <- cleanupRemoteEndPoint x rep Nothing
             flip Foldable.traverse_ mz $ \z -> do
               atomically $ writeTMChan (_localChan w) $
@@ -825,8 +829,8 @@ breakConnection AMQPInternalState{..} _ tgt =
         LocalEndPointClosed -> afterP ()
     TransportClosed -> return Map.empty
   where
-    dh = B8.init . fst $ B8.break (==':') (endPointAddressToByteString tgt)
-    onDeadHost = B8.isPrefixOf dh . endPointAddressToByteString
+    dh = endPointAddressToByteString tgt
+    onDeadHost = (== dh) . endPointAddressToByteString
 
 #if ! MIN_VERSION_base(4,7,0)
 --------------------------------------------------------------------------------
