@@ -28,10 +28,10 @@ testTransportCompliance newTransport = do
     , ("CloseOneConnection",    testCloseOneConnection transport numPings)
     , ("CloseOneDirection",     testCloseOneDirection transport numPings)
     , ("CloseReopen",           testCloseReopen transport numPings)
-    , ("ParallelConnects",      testParallelConnects transport (numPings * 2))
-    , ("SendAfterClose",        testSendAfterClose transport (numPings * 2))
-    , ("Crossing",              testCrossing transport numPings)
-    , ("CloseTwice",            testCloseTwice transport (numPings * 2))
+    , ("ParallelConnects",      testParallelConnects transport 50)
+    , ("SendAfterClose",        testSendAfterClose transport 50)
+    , ("Crossing",              testCrossing transport 10)
+    , ("CloseTwice",            testCloseTwice transport 10)
     , ("ConnectToSelf",         testConnectToSelf transport numPings)
     , ("ConnectToSelfTwice",    testConnectToSelfTwice transport numPings)
     , ("CloseSelf",             testCloseSelf newTransport)
@@ -39,10 +39,10 @@ testTransportCompliance newTransport = do
     , ("CloseTransport",        testCloseTransport newTransport)
     , ("ExceptionOnReceive",    testExceptionOnReceive newTransport)
     , ("SendException",         testSendException newTransport)
-    , ("Kill",                  testKill newTransport 30)
+    , ("Kill",                  testKill newTransport 1)
                                 -- testKill test have a timeconstraint so n-t-amqp
                                 -- fails to work with required speed, we need to
                                 -- reduce a number of tests here. (Same limitation as n-t-0MQ)
     ]
   where
-    numPings = 10 :: Int
+    numPings = 500 :: Int
